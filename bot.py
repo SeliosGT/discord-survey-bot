@@ -8,6 +8,7 @@ from flask import Flask, request, jsonify
 import threading
 import logging
 import traceback
+import time
 
 # ============================================================
 # НАСТРОЙКА ЛОГИРОВАНИЯ
@@ -77,10 +78,15 @@ async def on_message(message):
 # ФУНКЦИЯ: ОТПРАВКА УВЕДОМЛЕНИЯ (АСИНХРОННАЯ)
 # ============================================================
 
-async def send_notification_async(survey_type, answer_data, answer_id, date_str):
-    """Асинхронная отправка уведомления"""
+async def send_notification_async(survey_type, answer_data, answer_id, date_str, retry_count=0):
+    """Асинхронная отправка уведомления с повторными попытками"""
     try:
-        logger.info(f'📤 Начинаем отправку уведомления (заявка #{answer_id})')
+        logger.info(f'📤 Начинаем отправку уведомления (заявка #{answer_id}, попытка {retry_count + 1})')
+        
+        # Ждём, пока бот полностью запустится
+        if not client.is_ready():
+            logger.info('⏳ Бот ещё не готов, ждём...')
+            await asyncio.sleep(2)
         
         user = await client.fetch_user(ADMIN_USER_ID)
         logger.info(f'👤 Пользователь найден: {user.name}')
@@ -126,15 +132,33 @@ async def send_notification_async(survey_type, answer_data, answer_id, date_str)
         
         await user.send(content=f"🔔 **Поступила новая заявка #{answer_id}!**", embed=embed, view=view)
         logger.info(f'✅ Уведомление отправлено админу (заявка #{answer_id})')
+        return True
         
     except discord.Forbidden:
         logger.warning(f'⚠️ Бот не может писать админу в ЛС! Добавьте бота в друзья.')
-        logger.warning(f'ℹ️ Если бот уже в друзьях, попробуйте перезапустить бота.')
+        return False
     except discord.HTTPException as e:
         logger.error(f'⚠️ HTTP ошибка при отправке: {e.status} - {e.text}')
+        if retry_count < 3:
+            logger.info(f'🔄 Повторная попытка через 2 секунды...')
+            await asyncio.sleep(2)
+            return await send_notification_async(survey_type, answer_data, answer_id, date_str, retry_count + 1)
+        return False
+    except asyncio.TimeoutError:
+        logger.error(f'⏰ Таймаут при отправке')
+        if retry_count < 3:
+            logger.info(f'🔄 Повторная попытка через 3 секунды...')
+            await asyncio.sleep(3)
+            return await send_notification_async(survey_type, answer_data, answer_id, date_str, retry_count + 1)
+        return False
     except Exception as e:
         logger.error(f'⚠️ Ошибка отправки уведомления: {e}')
         logger.error(f'📋 Трассировка:\n{traceback.format_exc()}')
+        if retry_count < 3:
+            logger.info(f'🔄 Повторная попытка через 2 секунды...')
+            await asyncio.sleep(2)
+            return await send_notification_async(survey_type, answer_data, answer_id, date_str, retry_count + 1)
+        return False
 
 # ============================================================
 # СИНХРОННАЯ ОБЁРТКА ДЛЯ FLASK
@@ -150,8 +174,8 @@ def send_notification_sync(survey_type, answer_data, answer_id, date_str):
             loop
         )
         
-        # Ждём результат с таймаутом
-        result = future.result(timeout=30)
+        # Увеличиваем таймаут до 60 секунд
+        result = future.result(timeout=60)
         logger.info(f'✅ Синхронная отправка завершена (заявка #{answer_id})')
         return result
         
@@ -224,6 +248,9 @@ if __name__ == '__main__':
     bot_thread = threading.Thread(target=run_bot)
     bot_thread.daemon = True
     bot_thread.start()
+    
+    # Даём боту время на запуск
+    time.sleep(3)
     
     logger.info('🌐 Запуск веб-сервера на порту 8080...')
     app.run(host='0.0.0.0', port=8080)
