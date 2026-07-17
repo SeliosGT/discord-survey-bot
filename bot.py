@@ -39,6 +39,13 @@ intents.dm_messages = True
 client = discord.Client(intents=intents)
 
 # ============================================================
+# ГЛОБАЛЬНЫЙ EVENT LOOP
+# ============================================================
+
+loop = asyncio.new_event_loop()
+asyncio.set_event_loop(loop)
+
+# ============================================================
 # СОБЫТИЕ: БОТ ГОТОВ
 # ============================================================
 
@@ -63,22 +70,8 @@ async def on_message(message):
         return
 
 # ============================================================
-# ФУНКЦИЯ: ОТПРАВКА УВЕДОМЛЕНИЯ (СИНХРОННАЯ ОБЁРТКА)
+# ФУНКЦИЯ: ОТПРАВКА УВЕДОМЛЕНИЯ (АСИНХРОННАЯ)
 # ============================================================
-
-def send_notification_sync(survey_type, answer_data, answer_id, date_str):
-    """
-    Синхронная обёртка для отправки уведомления.
-    Используется из Flask-эндпоинта.
-    """
-    # Создаём новый event loop для этого вызова
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    
-    try:
-        loop.run_until_complete(send_notification_async(survey_type, answer_data, answer_id, date_str))
-    finally:
-        loop.close()
 
 async def send_notification_async(survey_type, answer_data, answer_id, date_str):
     """Асинхронная отправка уведомления"""
@@ -133,6 +126,21 @@ async def send_notification_async(survey_type, answer_data, answer_id, date_str)
         logger.error(f'⚠️ Ошибка отправки уведомления: {e}')
 
 # ============================================================
+# СИНХРОННАЯ ОБЁРТКА ДЛЯ FLASK
+# ============================================================
+
+def send_notification_sync(survey_type, answer_data, answer_id, date_str):
+    """Синхронная обёртка для вызова из Flask"""
+    future = asyncio.run_coroutine_threadsafe(
+        send_notification_async(survey_type, answer_data, answer_id, date_str),
+        loop
+    )
+    try:
+        future.result(timeout=30)  # Ждём до 30 секунд
+    except Exception as e:
+        logger.error(f'⚠️ Ошибка в send_notification_sync: {e}')
+
+# ============================================================
 # ВЕБ-СЕРВЕР ДЛЯ ПРИЁМА ЗАПРОСОВ
 # ============================================================
 
@@ -150,8 +158,12 @@ def notify():
         
         logger.info(f'📨 Получен запрос на уведомление: заявка #{answer_id}, тип: {survey_type}')
         
-        # Используем синхронную обёртку
-        send_notification_sync(survey_type, answer_data, answer_id, date_str)
+        # Запускаем в фоновом режиме (не ждём ответа, чтобы не блокировать Flask)
+        threading.Thread(
+            target=send_notification_sync,
+            args=(survey_type, answer_data, answer_id, date_str),
+            daemon=True
+        ).start()
         
         return jsonify({"success": True}), 200
         
