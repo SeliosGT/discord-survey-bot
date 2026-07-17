@@ -47,32 +47,13 @@ async def on_ready():
     logger.info(f'✅ Бот {client.user.name} запущен!')
     logger.info(f'📊 На серверах: {len(client.guilds)}')
     
-    # Пробуем отправить тестовое сообщение админу
     try:
         user = await client.fetch_user(ADMIN_USER_ID)
-        
-        # Проверяем, можем ли писать в ЛС
         try:
             await user.send('🤖 **Бот запущен!** Готов принимать уведомления о новых заявках.')
             logger.info('✅ Приветствие отправлено админу в ЛС')
         except discord.Forbidden:
             logger.warning('⚠️ Бот не может писать админу в ЛС! Добавьте бота в друзья.')
-            
-            # Пробуем найти сервер, где есть админ
-            for guild in client.guilds:
-                member = guild.get_member(ADMIN_USER_ID)
-                if member:
-                    try:
-                        # Пытаемся отправить в общий канал
-                        for channel in guild.text_channels:
-                            if channel.permissions_for(guild.me).send_messages:
-                                await channel.send(f'🤖 **Бот запущен!**\n👤 Админ: {member.mention}\n📌 Добавьте бота в друзья для получения уведомлений в ЛС.')
-                                logger.info(f'✅ Сообщение отправлено в канал #{channel.name}')
-                                break
-                        break
-                    except:
-                        pass
-                    
     except Exception as e:
         logger.error(f'⚠️ Ошибка при отправке приветствия: {e}')
 
@@ -82,11 +63,25 @@ async def on_message(message):
         return
 
 # ============================================================
-# ФУНКЦИЯ: ОТПРАВКА УВЕДОМЛЕНИЯ
+# ФУНКЦИЯ: ОТПРАВКА УВЕДОМЛЕНИЯ (СИНХРОННАЯ ОБЁРТКА)
 # ============================================================
 
-async def send_notification(survey_type, answer_data, answer_id, date_str):
-    """Отправляет уведомление админу в ЛС"""
+def send_notification_sync(survey_type, answer_data, answer_id, date_str):
+    """
+    Синхронная обёртка для отправки уведомления.
+    Используется из Flask-эндпоинта.
+    """
+    # Создаём новый event loop для этого вызова
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    
+    try:
+        loop.run_until_complete(send_notification_async(survey_type, answer_data, answer_id, date_str))
+    finally:
+        loop.close()
+
+async def send_notification_async(survey_type, answer_data, answer_id, date_str):
+    """Асинхронная отправка уведомления"""
     try:
         user = await client.fetch_user(ADMIN_USER_ID)
         
@@ -96,7 +91,6 @@ async def send_notification(survey_type, answer_data, answer_id, date_str):
         }
         type_name = type_names.get(survey_type, '📋 Новая заявка')
         
-        # Создаём красивое Embed-сообщение
         embed = discord.Embed(
             title="🔔 **Новая заявка!**",
             color=0x5865F2,
@@ -110,7 +104,6 @@ async def send_notification(survey_type, answer_data, answer_id, date_str):
         embed.add_field(name="📅 Дата подачи", value=date_str, inline=True)
         embed.add_field(name="🔗 Ссылка", value=f"[Открыть админ-панель]({SERVER_URL}/admin.html)", inline=False)
         
-        # Мотивация (если есть)
         motivation = answer_data.get('motivation', '')
         if motivation:
             embed.add_field(
@@ -124,7 +117,6 @@ async def send_notification(survey_type, answer_data, answer_id, date_str):
             icon_url="https://cdn-icons-png.flaticon.com/512/3196/3196109.png"
         )
         
-        # Кнопка-ссылка
         view = discord.ui.View()
         view.add_item(discord.ui.Button(
             label="📋 Перейти к админ-панели",
@@ -132,7 +124,6 @@ async def send_notification(survey_type, answer_data, answer_id, date_str):
             style=discord.ButtonStyle.link
         ))
         
-        # Отправляем в ЛС
         await user.send(content=f"🔔 **Поступила новая заявка #{answer_id}!**", embed=embed, view=view)
         logger.info(f'✅ Уведомление отправлено админу (заявка #{answer_id})')
         
@@ -159,8 +150,8 @@ def notify():
         
         logger.info(f'📨 Получен запрос на уведомление: заявка #{answer_id}, тип: {survey_type}')
         
-        # Запускаем отправку в фоновом режиме
-        asyncio.create_task(send_notification(survey_type, answer_data, answer_id, date_str))
+        # Используем синхронную обёртку
+        send_notification_sync(survey_type, answer_data, answer_id, date_str)
         
         return jsonify({"success": True}), 200
         
@@ -174,11 +165,10 @@ def index():
 
 @app.route('/ping')
 def ping():
-    """Эндпоинт для Uptime Robot"""
     return "pong"
 
 # ============================================================
-# ЗАПУСК БОТА В ОТДЕЛЬНОМ ПОТОКЕ
+# ЗАПУСК БОТА
 # ============================================================
 
 def run_bot():
@@ -195,6 +185,5 @@ if __name__ == '__main__':
     bot_thread.daemon = True
     bot_thread.start()
     
-    # Запускаем Flask-сервер
     logger.info('🌐 Запуск веб-сервера на порту 8080...')
     app.run(host='0.0.0.0', port=8080)
