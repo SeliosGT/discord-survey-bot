@@ -7,12 +7,16 @@ import asyncio
 from flask import Flask, request, jsonify
 import threading
 import logging
+import traceback
 
 # ============================================================
 # НАСТРОЙКА ЛОГИРОВАНИЯ
 # ============================================================
 
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
 logger = logging.getLogger(__name__)
 
 # ============================================================
@@ -76,7 +80,10 @@ async def on_message(message):
 async def send_notification_async(survey_type, answer_data, answer_id, date_str):
     """Асинхронная отправка уведомления"""
     try:
+        logger.info(f'📤 Начинаем отправку уведомления (заявка #{answer_id})')
+        
         user = await client.fetch_user(ADMIN_USER_ID)
+        logger.info(f'👤 Пользователь найден: {user.name}')
         
         type_names = {
             'discipline': '🏛️ Дисциплинарный инспектор',
@@ -122,8 +129,12 @@ async def send_notification_async(survey_type, answer_data, answer_id, date_str)
         
     except discord.Forbidden:
         logger.warning(f'⚠️ Бот не может писать админу в ЛС! Добавьте бота в друзья.')
+        logger.warning(f'ℹ️ Если бот уже в друзьях, попробуйте перезапустить бота.')
+    except discord.HTTPException as e:
+        logger.error(f'⚠️ HTTP ошибка при отправке: {e.status} - {e.text}')
     except Exception as e:
         logger.error(f'⚠️ Ошибка отправки уведомления: {e}')
+        logger.error(f'📋 Трассировка:\n{traceback.format_exc()}')
 
 # ============================================================
 # СИНХРОННАЯ ОБЁРТКА ДЛЯ FLASK
@@ -131,14 +142,26 @@ async def send_notification_async(survey_type, answer_data, answer_id, date_str)
 
 def send_notification_sync(survey_type, answer_data, answer_id, date_str):
     """Синхронная обёртка для вызова из Flask"""
-    future = asyncio.run_coroutine_threadsafe(
-        send_notification_async(survey_type, answer_data, answer_id, date_str),
-        loop
-    )
     try:
-        future.result(timeout=30)  # Ждём до 30 секунд
+        logger.info(f'🔄 Запуск синхронной отправки (заявка #{answer_id})')
+        
+        future = asyncio.run_coroutine_threadsafe(
+            send_notification_async(survey_type, answer_data, answer_id, date_str),
+            loop
+        )
+        
+        # Ждём результат с таймаутом
+        result = future.result(timeout=30)
+        logger.info(f'✅ Синхронная отправка завершена (заявка #{answer_id})')
+        return result
+        
+    except asyncio.TimeoutError:
+        logger.error(f'⏰ Таймаут при отправке уведомления (заявка #{answer_id})')
+        raise
     except Exception as e:
-        logger.error(f'⚠️ Ошибка в send_notification_sync: {e}')
+        logger.error(f'❌ Ошибка в send_notification_sync (заявка #{answer_id}): {e}')
+        logger.error(f'📋 Трассировка:\n{traceback.format_exc()}')
+        raise
 
 # ============================================================
 # ВЕБ-СЕРВЕР ДЛЯ ПРИЁМА ЗАПРОСОВ
@@ -158,17 +181,21 @@ def notify():
         
         logger.info(f'📨 Получен запрос на уведомление: заявка #{answer_id}, тип: {survey_type}')
         
-        # Запускаем в фоновом режиме (не ждём ответа, чтобы не блокировать Flask)
-        threading.Thread(
-            target=send_notification_sync,
-            args=(survey_type, answer_data, answer_id, date_str),
-            daemon=True
-        ).start()
+        # Запускаем в отдельном потоке, чтобы не блокировать Flask
+        def run_sync():
+            try:
+                send_notification_sync(survey_type, answer_data, answer_id, date_str)
+            except Exception as e:
+                logger.error(f'❌ Ошибка в потоке: {e}')
+        
+        thread = threading.Thread(target=run_sync, daemon=True)
+        thread.start()
         
         return jsonify({"success": True}), 200
         
     except Exception as e:
         logger.error(f'⚠️ Ошибка в /notify: {e}')
+        logger.error(f'📋 Трассировка:\n{traceback.format_exc()}')
         return jsonify({"success": False, "error": str(e)}), 500
 
 @app.route('/')
@@ -188,6 +215,7 @@ def run_bot():
         client.run(TOKEN)
     except Exception as e:
         logger.error(f'❌ Ошибка запуска бота: {e}')
+        logger.error(f'📋 Трассировка:\n{traceback.format_exc()}')
 
 if __name__ == '__main__':
     logger.info('🚀 Запуск бота...')
