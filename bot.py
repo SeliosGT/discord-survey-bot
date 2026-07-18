@@ -82,28 +82,51 @@ class NotificationBot(discord.Client):
         answer_data = data['answer_data']
         date_str = data['date_str']
         
-        # Конвертируем время: добавляем 3 часа к тому что пришло
-        try:
-            # Пробуем распарсить дату
-            dt = datetime.strptime(date_str, '%Y-%m-%d %H:%M:%S')
-        except:
-            try:
-                dt = datetime.strptime(date_str, '%Y-%m-%d %H:%M')
-            except:
-                try:
-                    dt = datetime.strptime(date_str, '%d.%m.%Y %H:%M:%S')
-                except:
-                    try:
-                        dt = datetime.strptime(date_str, '%d.%m.%Y %H:%M')
-                    except:
-                        # Если не получилось - используем как есть
-                        formatted_date = date_str
-                        dt = None
+        logger.info(f'📅 Обработка даты: "{date_str}"')
         
-        if dt:
-            # Добавляем 3 часа
-            dt = dt + timedelta(hours=3)
-            formatted_date = dt.strftime('%d.%m.%Y %H:%M')
+        # Просто добавляем 3 часа через манипуляции со строкой
+        try:
+            # Пробуем формат YYYY-MM-DD HH:MM:SS
+            if len(date_str) == 19 and date_str[4] == '-' and date_str[7] == '-':
+                dt = datetime.strptime(date_str, '%Y-%m-%d %H:%M:%S')
+                dt = dt + timedelta(hours=3)
+                formatted_date = dt.strftime('%d.%m.%Y %H:%M')
+                logger.info(f'✅ Формат 1: {date_str} -> {formatted_date}')
+            # Пробуем формат YYYY-MM-DD HH:MM
+            elif len(date_str) == 16 and date_str[4] == '-' and date_str[7] == '-':
+                dt = datetime.strptime(date_str, '%Y-%m-%d %H:%M')
+                dt = dt + timedelta(hours=3)
+                formatted_date = dt.strftime('%d.%m.%Y %H:%M')
+                logger.info(f'✅ Формат 2: {date_str} -> {formatted_date}')
+            # Пробуем формат DD.MM.YYYY HH:MM:SS
+            elif len(date_str) == 19 and date_str[2] == '.' and date_str[5] == '.':
+                dt = datetime.strptime(date_str, '%d.%m.%Y %H:%M:%S')
+                dt = dt + timedelta(hours=3)
+                formatted_date = dt.strftime('%d.%m.%Y %H:%M')
+                logger.info(f'✅ Формат 3: {date_str} -> {formatted_date}')
+            # Пробуем формат DD.MM.YYYY HH:MM
+            elif len(date_str) == 16 and date_str[2] == '.' and date_str[5] == '.':
+                dt = datetime.strptime(date_str, '%d.%m.%Y %H:%M')
+                dt = dt + timedelta(hours=3)
+                formatted_date = dt.strftime('%d.%m.%Y %H:%M')
+                logger.info(f'✅ Формат 4: {date_str} -> {formatted_date}')
+            else:
+                # Если формат не распознан, просто добавляем +3 часа вручную
+                logger.warning(f'⚠️ Неизвестный формат даты: "{date_str}", длина: {len(date_str)}')
+                # Ищем время в строке и добавляем 3 часа
+                import re
+                time_match = re.search(r'(\d{2}):(\d{2})', date_str)
+                if time_match:
+                    hours = int(time_match.group(1))
+                    new_hours = (hours + 3) % 24
+                    formatted_date = date_str[:time_match.start(1)] + f'{new_hours:02d}' + date_str[time_match.end(1):]
+                    logger.info(f'🔄 Ручная замена: {date_str} -> {formatted_date}')
+                else:
+                    formatted_date = date_str + ' (+3ч)'
+                    logger.info(f'❌ Не удалось обработать: {date_str}')
+        except Exception as e:
+            logger.error(f'❌ Ошибка обработки даты: {e}')
+            formatted_date = date_str
         
         type_names = {
             'discipline': '🏛️ Дисциплинарный инспектор',
@@ -198,7 +221,7 @@ def notify():
         date_str = data.get('date_str')
         
         logger.info(f'📨 Получен запрос: заявка #{answer_id}')
-        logger.info(f'📅 Исходная дата: {date_str}')
+        logger.info(f'📅 Исходная дата: "{date_str}" (тип: {type(date_str)})')
         
         if not client.is_ready():
             logger.error('❌ Бот не готов')
