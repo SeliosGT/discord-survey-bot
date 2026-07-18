@@ -9,6 +9,7 @@ import threading
 import logging
 import traceback
 import time
+import sys
 
 # ============================================================
 # НАСТРОЙКА ЛОГИРОВАНИЯ
@@ -29,12 +30,16 @@ ADMIN_USER_ID = int(os.environ.get('ADMIN_USER_ID', '0'))
 SERVER_URL = os.environ.get('SERVER_URL', 'https://opros-app.onrender.com')
 
 if not TOKEN:
-    logger.error("❌ DISCORD_BOT_TOKEN не найден! Добавьте переменную окружения.")
-    exit(1)
+    logger.error("❌ DISCORD_BOT_TOKEN не найден!")
+    sys.exit(1)
 
 if ADMIN_USER_ID == 0:
-    logger.error("❌ ADMIN_USER_ID не найден! Добавьте переменную окружения.")
-    exit(1)
+    logger.error("❌ ADMIN_USER_ID не найден!")
+    sys.exit(1)
+
+# ============================================================
+# НАСТРОЙКА DISCORD
+# ============================================================
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -42,13 +47,8 @@ intents.members = True
 intents.dm_messages = True
 
 client = discord.Client(intents=intents)
-
-# ============================================================
-# ГЛОБАЛЬНЫЙ EVENT LOOP
-# ============================================================
-
-loop = asyncio.new_event_loop()
-asyncio.set_event_loop(loop)
+loop = None
+client_ready = False
 
 # ============================================================
 # СОБЫТИЕ: БОТ ГОТОВ
@@ -56,18 +56,18 @@ asyncio.set_event_loop(loop)
 
 @client.event
 async def on_ready():
+    global client_ready
+    client_ready = True
     logger.info(f'✅ Бот {client.user.name} запущен!')
     logger.info(f'📊 На серверах: {len(client.guilds)}')
     
+    # Пробуем отправить приветствие
     try:
         user = await client.fetch_user(ADMIN_USER_ID)
-        try:
-            await user.send('🤖 **Бот запущен!** Готов принимать уведомления о новых заявках.')
-            logger.info('✅ Приветствие отправлено админу в ЛС')
-        except discord.Forbidden:
-            logger.warning('⚠️ Бот не может писать админу в ЛС! Добавьте бота в друзья.')
+        await user.send('🤖 **Бот запущен!** Готов принимать уведомления.')
+        logger.info('✅ Приветствие отправлено админу в ЛС')
     except Exception as e:
-        logger.error(f'⚠️ Ошибка при отправке приветствия: {e}')
+        logger.warning(f'⚠️ Не удалось отправить приветствие: {e}')
 
 @client.event
 async def on_message(message):
@@ -75,21 +75,36 @@ async def on_message(message):
         return
 
 # ============================================================
-# ФУНКЦИЯ: ОТПРАВКА УВЕДОМЛЕНИЯ (АСИНХРОННАЯ)
+# ЗАПУСК БОТА
 # ============================================================
 
-async def send_notification_async(survey_type, answer_data, answer_id, date_str, retry_count=0):
-    """Асинхронная отправка уведомления с повторными попытками"""
+def run_bot():
+    global loop
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
     try:
-        logger.info(f'📤 Начинаем отправку уведомления (заявка #{answer_id}, попытка {retry_count + 1})')
-        
-        # Ждём, пока бот полностью запустится
-        if not client.is_ready():
-            logger.info('⏳ Бот ещё не готов, ждём...')
-            await asyncio.sleep(2)
+        client.run(TOKEN)
+    except Exception as e:
+        logger.error(f'❌ Бот упал: {e}')
+        logger.error(traceback.format_exc())
+
+# ============================================================
+# ФУНКЦИЯ: ОТПРАВКА УВЕДОМЛЕНИЯ
+# ============================================================
+
+async def send_notification_async(survey_type, answer_data, answer_id, date_str):
+    try:
+        if not client_ready:
+            logger.info('⏳ Ждём готовности бота...')
+            for i in range(10):
+                if client_ready:
+                    break
+                await asyncio.sleep(1)
+            if not client_ready:
+                logger.error('❌ Бот не готов после 10 секунд ожидания')
+                return False
         
         user = await client.fetch_user(ADMIN_USER_ID)
-        logger.info(f'👤 Пользователь найден: {user.name}')
         
         type_names = {
             'discipline': '🏛️ Дисциплинарный инспектор',
@@ -98,104 +113,67 @@ async def send_notification_async(survey_type, answer_data, answer_id, date_str,
         type_name = type_names.get(survey_type, '📋 Новая заявка')
         
         embed = discord.Embed(
-            title="🔔 **Новая заявка!**",
+            title="🔔 Новая заявка!",
             color=0x5865F2,
             timestamp=datetime.utcnow()
         )
         
-        embed.add_field(name="🆔 Номер заявки", value=f"`#{answer_id}`", inline=True)
-        embed.add_field(name="📋 Куда устроиться", value=type_name, inline=True)
-        embed.add_field(name="👤 Имя персонажа (IC)", value=answer_data.get('q1', '—'), inline=True)
-        embed.add_field(name="👤 Ваше имя (OOC)", value=answer_data.get('q2', '—'), inline=True)
-        embed.add_field(name="📅 Дата подачи", value=date_str, inline=True)
-        embed.add_field(name="🔗 Ссылка", value=f"[Открыть админ-панель]({SERVER_URL}/admin.html)", inline=False)
+        embed.add_field(name="🆔 Номер", value=f"#{answer_id}", inline=True)
+        embed.add_field(name="📋 Должность", value=type_name, inline=True)
+        embed.add_field(name="👤 IC", value=answer_data.get('q1', '—'), inline=True)
+        embed.add_field(name="👤 OOC", value=answer_data.get('q2', '—'), inline=True)
+        embed.add_field(name="📅 Дата", value=date_str, inline=True)
+        embed.add_field(name="🔗 Ссылка", value=f"[Админ-панель]({SERVER_URL}/admin.html)", inline=False)
         
-        motivation = answer_data.get('motivation', '')
-        if motivation:
-            embed.add_field(
-                name="📜 Мотивация",
-                value=motivation[:200] + ('...' if len(motivation) > 200 else ''),
-                inline=False
-            )
-        
-        embed.set_footer(
-            text="by Rubi Antwoord",
-            icon_url="https://cdn-icons-png.flaticon.com/512/3196/3196109.png"
-        )
+        embed.set_footer(text="by Rubi Antwoord")
         
         view = discord.ui.View()
         view.add_item(discord.ui.Button(
-            label="📋 Перейти к админ-панели",
+            label="📋 Открыть админку",
             url=f"{SERVER_URL}/admin.html",
             style=discord.ButtonStyle.link
         ))
         
-        await user.send(content=f"🔔 **Поступила новая заявка #{answer_id}!**", embed=embed, view=view)
-        logger.info(f'✅ Уведомление отправлено админу (заявка #{answer_id})')
+        await user.send(
+            content=f"🔔 **Новая заявка #{answer_id}!**",
+            embed=embed,
+            view=view
+        )
+        logger.info(f'✅ Уведомление отправлено (заявка #{answer_id})')
         return True
         
-    except discord.Forbidden:
-        logger.warning(f'⚠️ Бот не может писать админу в ЛС! Добавьте бота в друзья.')
-        return False
-    except discord.HTTPException as e:
-        logger.error(f'⚠️ HTTP ошибка при отправке: {e.status} - {e.text}')
-        if retry_count < 3:
-            logger.info(f'🔄 Повторная попытка через 2 секунды...')
-            await asyncio.sleep(2)
-            return await send_notification_async(survey_type, answer_data, answer_id, date_str, retry_count + 1)
-        return False
-    except asyncio.TimeoutError:
-        logger.error(f'⏰ Таймаут при отправке')
-        if retry_count < 3:
-            logger.info(f'🔄 Повторная попытка через 3 секунды...')
-            await asyncio.sleep(3)
-            return await send_notification_async(survey_type, answer_data, answer_id, date_str, retry_count + 1)
-        return False
     except Exception as e:
-        logger.error(f'⚠️ Ошибка отправки уведомления: {e}')
-        logger.error(f'📋 Трассировка:\n{traceback.format_exc()}')
-        if retry_count < 3:
-            logger.info(f'🔄 Повторная попытка через 2 секунды...')
-            await asyncio.sleep(2)
-            return await send_notification_async(survey_type, answer_data, answer_id, date_str, retry_count + 1)
+        logger.error(f'❌ Ошибка отправки: {e}')
+        logger.error(traceback.format_exc())
         return False
 
 # ============================================================
-# СИНХРОННАЯ ОБЁРТКА ДЛЯ FLASK
+# СИНХРОННАЯ ОБЁРТКА
 # ============================================================
 
 def send_notification_sync(survey_type, answer_data, answer_id, date_str):
-    """Синхронная обёртка для вызова из Flask"""
     try:
-        logger.info(f'🔄 Запуск синхронной отправки (заявка #{answer_id})')
-        
+        logger.info(f'📤 Отправка уведомления (заявка #{answer_id})')
         future = asyncio.run_coroutine_threadsafe(
             send_notification_async(survey_type, answer_data, answer_id, date_str),
             loop
         )
-        
-        # Увеличиваем таймаут до 60 секунд
-        result = future.result(timeout=60)
-        logger.info(f'✅ Синхронная отправка завершена (заявка #{answer_id})')
+        result = future.result(timeout=30)
+        logger.info(f'✅ Готово (заявка #{answer_id})')
         return result
-        
-    except asyncio.TimeoutError:
-        logger.error(f'⏰ Таймаут при отправке уведомления (заявка #{answer_id})')
-        raise
     except Exception as e:
-        logger.error(f'❌ Ошибка в send_notification_sync (заявка #{answer_id}): {e}')
-        logger.error(f'📋 Трассировка:\n{traceback.format_exc()}')
+        logger.error(f'❌ Ошибка: {e}')
+        logger.error(traceback.format_exc())
         raise
 
 # ============================================================
-# ВЕБ-СЕРВЕР ДЛЯ ПРИЁМА ЗАПРОСОВ
+# FLASK
 # ============================================================
 
 app = Flask(__name__)
 
 @app.route('/notify', methods=['POST'])
 def notify():
-    """Принимает POST-запрос от основного сервера"""
     try:
         data = request.json
         survey_type = data.get('survey_type')
@@ -203,9 +181,8 @@ def notify():
         answer_id = data.get('answer_id')
         date_str = data.get('date_str')
         
-        logger.info(f'📨 Получен запрос на уведомление: заявка #{answer_id}, тип: {survey_type}')
+        logger.info(f'📨 Запрос на уведомление: заявка #{answer_id}')
         
-        # Запускаем в отдельном потоке, чтобы не блокировать Flask
         def run_sync():
             try:
                 send_notification_sync(survey_type, answer_data, answer_id, date_str)
@@ -218,8 +195,7 @@ def notify():
         return jsonify({"success": True}), 200
         
     except Exception as e:
-        logger.error(f'⚠️ Ошибка в /notify: {e}')
-        logger.error(f'📋 Трассировка:\n{traceback.format_exc()}')
+        logger.error(f'❌ Ошибка в /notify: {e}')
         return jsonify({"success": False, "error": str(e)}), 500
 
 @app.route('/')
@@ -230,27 +206,30 @@ def index():
 def ping():
     return "pong"
 
-# ============================================================
-# ЗАПУСК БОТА
-# ============================================================
+@app.route('/status')
+def status():
+    return jsonify({
+        "bot_ready": client_ready,
+        "bot_name": client.user.name if client.user else None
+    })
 
-def run_bot():
-    try:
-        client.run(TOKEN)
-    except Exception as e:
-        logger.error(f'❌ Ошибка запуска бота: {e}')
-        logger.error(f'📋 Трассировка:\n{traceback.format_exc()}')
+# ============================================================
+# ЗАПУСК
+# ============================================================
 
 if __name__ == '__main__':
-    logger.info('🚀 Запуск бота...')
+    logger.info('🚀 Запуск...')
     
-    # Запускаем бота в отдельном потоке
-    bot_thread = threading.Thread(target=run_bot)
-    bot_thread.daemon = True
+    # Запускаем бота
+    bot_thread = threading.Thread(target=run_bot, daemon=True)
     bot_thread.start()
     
-    # Даём боту время на запуск
-    time.sleep(3)
+    # Ждём, пока бот запустится
+    logger.info('⏳ Ожидание запуска бота...')
+    time.sleep(5)
     
-    logger.info('🌐 Запуск веб-сервера на порту 8080...')
+    if not client_ready:
+        logger.warning('⚠️ Бот не готов через 5 секунд, но продолжаем...')
+    
+    logger.info('🌐 Запуск Flask...')
     app.run(host='0.0.0.0', port=8080)
