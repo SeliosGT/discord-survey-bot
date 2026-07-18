@@ -2,7 +2,7 @@ import discord
 import os
 import requests
 import json
-from datetime import datetime
+from datetime import datetime, timezone
 import asyncio
 from flask import Flask, request, jsonify
 import threading
@@ -92,7 +92,7 @@ def run_bot():
         logger.error(traceback.format_exc())
 
 # ============================================================
-# ФУНКЦИЯ: ОТПРАВКА УВЕДОМЛЕНИЯ
+# ФУНКЦИЯ: ОТПРАВКА УВЕДОМЛЕНИЯ (ИСПРАВЛЕННАЯ)
 # ============================================================
 
 def send_notification(survey_type, answer_data, answer_id, date_str):
@@ -103,10 +103,20 @@ def send_notification(survey_type, answer_data, answer_id, date_str):
             logger.error('❌ Бот не готов к отправке')
             return False
         
+        # Получаем пользователя
         user = client.get_user(ADMIN_USER_ID)
         if not user:
-            logger.error('❌ Пользователь не найден в кеше')
-            return False
+            logger.error('❌ Пользователь не найден в кеше, пробуем fetch...')
+            # Пробуем получить через fetch
+            future = asyncio.run_coroutine_threadsafe(
+                client.fetch_user(ADMIN_USER_ID),
+                loop
+            )
+            try:
+                user = future.result(timeout=10)
+            except Exception as e:
+                logger.error(f'❌ Не удалось получить пользователя: {e}')
+                return False
         
         type_names = {
             'discipline': '🏛️ Дисциплинарный инспектор',
@@ -117,7 +127,7 @@ def send_notification(survey_type, answer_data, answer_id, date_str):
         embed = discord.Embed(
             title="🔔 Новая заявка!",
             color=0x5865F2,
-            timestamp=datetime.utcnow()
+            timestamp=datetime.now(timezone.utc)
         )
         
         embed.add_field(name="🆔 Номер", value=f"#{answer_id}", inline=True)
@@ -136,18 +146,33 @@ def send_notification(survey_type, answer_data, answer_id, date_str):
             style=discord.ButtonStyle.link
         ))
         
-        future = asyncio.run_coroutine_threadsafe(
-            user.send(
-                content=f"🔔 **Новая заявка #{answer_id}!**",
-                embed=embed,
-                view=view
-            ),
-            loop
-        )
+        # Отправляем с повторной попыткой
+        def send_message():
+            future = asyncio.run_coroutine_threadsafe(
+                user.send(
+                    content=f"🔔 **Новая заявка #{answer_id}!**",
+                    embed=embed,
+                    view=view
+                ),
+                loop
+            )
+            return future.result(timeout=30)
         
-        future.result(timeout=30)
-        logger.info(f'✅ Уведомление отправлено (заявка #{answer_id})')
-        return True
+        # Пробуем отправить с повторной попыткой
+        try:
+            send_message()
+            logger.info(f'✅ Уведомление отправлено (заявка #{answer_id})')
+            return True
+        except asyncio.TimeoutError:
+            logger.warning(f'⏰ Таймаут, пробуем ещё раз...')
+            time.sleep(2)
+            try:
+                send_message()
+                logger.info(f'✅ Уведомление отправлено (заявка #{answer_id}) со второй попытки')
+                return True
+            except asyncio.TimeoutError:
+                logger.error(f'⏰ Таймаут после двух попыток (заявка #{answer_id})')
+                return False
         
     except Exception as e:
         logger.error(f'❌ Ошибка отправки: {e}')
@@ -171,11 +196,18 @@ def notify():
         
         logger.info(f'📨 Запрос на уведомление: заявка #{answer_id}')
         
+        # Отправляем синхронно (блокируем до отправки)
         def run_sync():
-            send_notification(survey_type, answer_data, answer_id, date_str)
+            try:
+                send_notification(survey_type, answer_data, answer_id, date_str)
+            except Exception as e:
+                logger.error(f'❌ Ошибка в потоке: {e}')
         
         thread = threading.Thread(target=run_sync, daemon=True)
         thread.start()
+        
+        # Ждём немного, чтобы уведомление отправилось
+        time.sleep(1)
         
         return jsonify({"success": True}), 200
         
@@ -200,7 +232,7 @@ def status():
     })
 
 # ============================================================
-# ЗАПУСК — БЕЗ GUNICORN!
+# ЗАПУСК
 # ============================================================
 
 if __name__ == '__main__':
