@@ -52,7 +52,6 @@ intents.dm_messages = True
 def format_datetime_msk(date_str):
     """Форматирует дату в МСК (UTC+3)"""
     try:
-        # Пробуем разные форматы даты
         formats = [
             '%Y-%m-%d %H:%M:%S',
             '%Y-%m-%d %H:%M',
@@ -73,11 +72,9 @@ def format_datetime_msk(date_str):
         if dt is None:
             return f"{date_str} (МСК)"
         
-        # Если время без часового пояса, считаем что это UTC
         if dt.tzinfo is None:
             dt = dt.replace(tzinfo=timezone.utc)
         
-        # Переводим в МСК (UTC+3)
         msk_tz = timezone(timedelta(hours=3))
         dt_msk = dt.astimezone(msk_tz)
         
@@ -94,7 +91,6 @@ class NotificationBot(discord.Client):
         self.processing_task = None
         
     async def setup_hook(self):
-        """Запускается перед тем как бот подключится"""
         self.processing_task = self.loop.create_task(self.process_notifications())
         logger.info('🔄 Задача обработки уведомлений создана')
     
@@ -120,60 +116,41 @@ class NotificationBot(discord.Client):
         answer_data = data['answer_data']
         date_str = data['date_str']
         
-        # Форматируем дату в МСК
         formatted_date = format_datetime_msk(date_str)
         
-        # Названия должностей
         type_names = {
             'discipline': '🏛️ Дисциплинарный инспектор',
             'hr': '👔 HR-менеджер'
         }
         type_name = type_names.get(survey_type, '📋 Новая заявка')
         
-        # Получаем данные из анкеты
         ic_name = answer_data.get('q1', 'Не указано')
         ooc_name = answer_data.get('q2', 'Не указано')
         
-        # Создаем красивый embed
+        # Создаем красивое текстовое описание
+        description = (
+            f"```ansi\n"
+            f"🆔 Номер заявки      │ #{answer_id}\n"
+            f"📋 Должность         │ {type_name}\n"
+            f"👤 Имя персонажа (IC)│ {ic_name}\n"
+            f"👤 Ваше имя (OOC)    │ {ooc_name}\n"
+            f"📅 Дата подачи       │ {formatted_date}\n"
+            f"🔗 Ссылка            │ Админ-панель\n"
+            f"```"
+        )
+        
         embed = discord.Embed(
             title="🔔 Новая заявка!",
-            description=f"```ansi\n"
-                       f"┌───────────────────────────────────────────────┐\n"
-                       f"│ 🔔 Новая заявка!                             │\n"
-                       f"│                                                │\n"
-                       f"│ 🆔 Номер заявки      #{str(answer_id).ljust(20)}│\n"
-                       f"│ 📋 Куда устроиться   {type_name.ljust(24)}│\n"
-                       f"│ 👤 Имя персонажа (IC) {ic_name[:24].ljust(24)}│\n"
-                       f"│ 👤 Ваше имя (OOC)     {ooc_name[:24].ljust(24)}│\n"
-                       f"│ 📅 Дата подачи        {formatted_date[:24].ljust(24)}│\n"
-                       f"│ 🔗 Ссылка             Открыть админ-панель     │\n"
-                       f"│                                                │\n"
-                       f"│ by Rubi Antwoord                               │\n"
-                       f"└───────────────────────────────────────────────┘\n"
-                       f"```",
+            description=description,
             color=0x5865F2,
             timestamp=datetime.now(timezone.utc)
         )
-        
-        # Добавляем поля для лучшей читаемости на мобильных устройствах
-        embed.add_field(name="🆔 Номер заявки", value=f"#{answer_id}", inline=True)
-        embed.add_field(name="📋 Должность", value=type_name, inline=True)
-        embed.add_field(name="\u200b", value="\u200b", inline=True)  # Пустое поле для выравнивания
-        
-        embed.add_field(name="👤 Имя персонажа (IC)", value=ic_name, inline=True)
-        embed.add_field(name="👤 Ваше имя (OOC)", value=ooc_name, inline=True)
-        embed.add_field(name="\u200b", value="\u200b", inline=True)
-        
-        embed.add_field(name="📅 Дата подачи", value=formatted_date, inline=True)
-        embed.add_field(name="🔗 Ссылка", value=f"[Открыть админ-панель]({SERVER_URL}/admin.html)", inline=True)
-        embed.add_field(name="\u200b", value="\u200b", inline=True)
         
         embed.set_footer(text="by Rubi Antwoord")
         
         return embed
     
     async def process_notifications(self):
-        """Фоновая обработка очереди уведомлений"""
         await self.wait_until_ready()
         logger.info('🔄 Обработчик очереди запущен')
         
@@ -183,19 +160,15 @@ class NotificationBot(discord.Client):
                     data = self.notification_queue.popleft()
                     logger.info(f'📤 Отправка из очереди: заявка #{data["answer_id"]}')
                     
-                    # Создаем красивое embed-сообщение
                     embed = self.create_notification_embed(data)
                     
-                    # Создаем кнопку
                     view = discord.ui.View()
                     view.add_item(discord.ui.Button(
                         label="📋 Открыть админ-панель",
                         url=f"{SERVER_URL}/admin.html",
-                        style=discord.ButtonStyle.link,
-                        emoji="🔗"
+                        style=discord.ButtonStyle.link
                     ))
                     
-                    # Отправляем сообщение
                     await self.admin_user.send(
                         content=f"🔔 **Поступила новая заявка #{data['answer_id']}!**",
                         embed=embed,
@@ -212,7 +185,6 @@ class NotificationBot(discord.Client):
                 await asyncio.sleep(1)
     
     def add_notification(self, survey_type, answer_data, answer_id, date_str):
-        """Добавление уведомления в очередь"""
         self.notification_queue.append({
             'survey_type': survey_type,
             'answer_data': answer_data,
@@ -248,7 +220,6 @@ def notify():
             logger.error('❌ Админ не найден')
             return jsonify({"success": False, "error": "Admin user not found"}), 503
         
-        # Добавляем в очередь бота
         client.add_notification(survey_type, answer_data, answer_id, date_str)
         
         return jsonify({
@@ -295,11 +266,9 @@ def run_bot():
 if __name__ == '__main__':
     logger.info('🚀 Запуск бота в фоне...')
     
-    # Запускаем бота в отдельном потоке
     bot_thread = threading.Thread(target=run_bot, daemon=True)
     bot_thread.start()
     
-    # Ждем запуска
     logger.info('⏳ Ожидание готовности бота...')
     timeout = 30
     start_time = time.time()
