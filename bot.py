@@ -10,6 +10,7 @@ import logging
 import traceback
 import time
 import sys
+from queue import Queue
 
 # ============================================================
 # НАСТРОЙКА ЛОГИРОВАНИЯ
@@ -50,8 +51,9 @@ intents.members = True
 intents.dm_messages = True
 
 client = discord.Client(intents=intents)
-loop = None
 client_ready = False
+notification_queue = Queue()
+user_cache = None  # Кешируем пользователя
 
 # ============================================================
 # СОБЫТИЕ: БОТ ГОТОВ
@@ -59,16 +61,16 @@ client_ready = False
 
 @client.event
 async def on_ready():
-    global client_ready
+    global client_ready, user_cache
     client_ready = True
     logger.info(f'✅ Бот {client.user.name} запущен!')
     logger.info(f'📊 На серверах: {len(client.guilds)}')
     
     try:
-        user = await client.fetch_user(ADMIN_USER_ID)
-        if user:
-            await user.send('🤖 **Бот запущен!** Готов принимать уведомления.')
-            logger.info('✅ Приветствие отправлено админу в ЛС')
+        # Кешируем пользователя при старте
+        user_cache = await client.fetch_user(ADMIN_USER_ID)
+        await user_cache.send('🤖 **Бот запущен!** Готов принимать уведомления.')
+        logger.info('✅ Приветствие отправлено админу в ЛС')
     except Exception as e:
         logger.warning(f'⚠️ Не удалось отправить приветствие: {e}')
 
@@ -81,103 +83,96 @@ async def on_message(message):
 # ЗАПУСК БОТА
 # ============================================================
 
+async def process_notifications():
+    """Фоновая задача для обработки уведомлений"""
+    global user_cache
+    
+    while True:
+        try:
+            # Проверяем очередь
+            if not notification_queue.empty():
+                notification_data = notification_queue.get()
+                logger.info(f'📤 Отправка уведомления из очереди (заявка #{notification_data["answer_id"]})')
+                
+                # Обновляем кеш пользователя если нужно
+                if not user_cache:
+                    try:
+                        user_cache = await client.fetch_user(ADMIN_USER_ID)
+                    except Exception as e:
+                        logger.error(f'❌ Не удалось получить пользователя: {e}')
+                        continue
+                
+                # Формируем сообщение
+                type_names = {
+                    'discipline': '🏛️ Дисциплинарный инспектор',
+                    'hr': '👔 HR-менеджер'
+                }
+                type_name = type_names.get(notification_data['survey_type'], '📋 Новая заявка')
+                
+                embed = discord.Embed(
+                    title="🔔 Новая заявка!",
+                    color=0x5865F2,
+                    timestamp=datetime.now(timezone.utc)
+                )
+                
+                embed.add_field(name="🆔 Номер", value=f"#{notification_data['answer_id']}", inline=True)
+                embed.add_field(name="📋 Должность", value=type_name, inline=True)
+                embed.add_field(name="👤 IC", value=notification_data['answer_data'].get('q1', '—'), inline=True)
+                embed.add_field(name="👤 OOC", value=notification_data['answer_data'].get('q2', '—'), inline=True)
+                embed.add_field(name="📅 Дата", value=notification_data['date_str'], inline=True)
+                embed.add_field(name="🔗 Ссылка", value=f"[Админ-панель]({SERVER_URL}/admin.html)", inline=False)
+                
+                embed.set_footer(text="by Rubi Antwoord")
+                
+                view = discord.ui.View()
+                view.add_item(discord.ui.Button(
+                    label="📋 Открыть админку",
+                    url=f"{SERVER_URL}/admin.html",
+                    style=discord.ButtonStyle.link
+                ))
+                
+                # Отправляем
+                await user_cache.send(
+                    content=f"🔔 **Новая заявка #{notification_data['answer_id']}!**",
+                    embed=embed,
+                    view=view
+                )
+                
+                logger.info(f'✅ Уведомление отправлено (заявка #{notification_data["answer_id"]})')
+                notification_queue.task_done()
+            
+            await asyncio.sleep(0.5)  # Проверяем очередь каждые 500мс
+            
+        except Exception as e:
+            logger.error(f'❌ Ошибка обработки уведомления: {e}')
+            logger.error(traceback.format_exc())
+            await asyncio.sleep(1)  # Ждем перед повторной попыткой
+
 def run_bot():
-    global loop
     try:
         logger.info('🚀 Запуск бота...')
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
+        
+        # Запускаем фоновую задачу при старте
+        @client.event
+        async def on_ready_inner():
+            global client_ready, user_cache
+            client_ready = True
+            logger.info(f'✅ Бот {client.user.name} запущен!')
+            logger.info(f'📊 На серверах: {len(client.guilds)}')
+            
+            try:
+                user_cache = await client.fetch_user(ADMIN_USER_ID)
+                await user_cache.send('🤖 **Бот запущен!** Готов принимать уведомления.')
+                logger.info('✅ Приветствие отправлено админу в ЛС')
+                # Запускаем обработчик очереди
+                client.loop.create_task(process_notifications())
+            except Exception as e:
+                logger.warning(f'⚠️ Не удалось отправить приветствие: {e}')
+        
         client.run(TOKEN)
     except Exception as e:
         logger.error(f'❌ Бот упал: {e}')
         logger.error(traceback.format_exc())
-
-# ============================================================
-# АСИНХРОННАЯ ФУНКЦИЯ ОТПРАВКИ (новая)
-# ============================================================
-
-async def async_send_notification(survey_type, answer_data, answer_id, date_str):
-    """Асинхронная версия отправки уведомления"""
-    try:
-        logger.info(f'📤 Отправка уведомления (заявка #{answer_id})')
-        
-        # Получаем пользователя через fetch_user (работает гарантированно)
-        user = await client.fetch_user(ADMIN_USER_ID)
-        if not user:
-            logger.error('❌ Не удалось получить пользователя')
-            return False
-        
-        type_names = {
-            'discipline': '🏛️ Дисциплинарный инспектор',
-            'hr': '👔 HR-менеджер'
-        }
-        type_name = type_names.get(survey_type, '📋 Новая заявка')
-        
-        embed = discord.Embed(
-            title="🔔 Новая заявка!",
-            color=0x5865F2,
-            timestamp=datetime.now(timezone.utc)
-        )
-        
-        embed.add_field(name="🆔 Номер", value=f"#{answer_id}", inline=True)
-        embed.add_field(name="📋 Должность", value=type_name, inline=True)
-        embed.add_field(name="👤 IC", value=answer_data.get('q1', '—'), inline=True)
-        embed.add_field(name="👤 OOC", value=answer_data.get('q2', '—'), inline=True)
-        embed.add_field(name="📅 Дата", value=date_str, inline=True)
-        embed.add_field(name="🔗 Ссылка", value=f"[Админ-панель]({SERVER_URL}/admin.html)", inline=False)
-        
-        embed.set_footer(text="by Rubi Antwoord")
-        
-        view = discord.ui.View()
-        view.add_item(discord.ui.Button(
-            label="📋 Открыть админку",
-            url=f"{SERVER_URL}/admin.html",
-            style=discord.ButtonStyle.link
-        ))
-        
-        # Отправляем сообщение
-        await user.send(
-            content=f"🔔 **Новая заявка #{answer_id}!**",
-            embed=embed,
-            view=view
-        )
-        
-        logger.info(f'✅ Уведомление отправлено (заявка #{answer_id})')
-        return True
-        
-    except Exception as e:
-        logger.error(f'❌ Ошибка отправки: {e}')
-        logger.error(traceback.format_exc())
-        return False
-
-# ============================================================
-# СИНХРОННАЯ ОБЕРТКА ДЛЯ FLASK
-# ============================================================
-
-def send_notification_sync(survey_type, answer_data, answer_id, date_str):
-    """Синхронная обертка для вызова из Flask"""
-    if not loop or not client_ready:
-        logger.error('❌ Бот не готов к отправке')
-        return False
-    
-    try:
-        # Создаем корутину и отправляем в event loop
-        future = asyncio.run_coroutine_threadsafe(
-            async_send_notification(survey_type, answer_data, answer_id, date_str),
-            loop
-        )
-        
-        # Ждем результат с таймаутом
-        result = future.result(timeout=10)
-        return result
-        
-    except asyncio.TimeoutError:
-        logger.error(f'⏰ Таймаут отправки (заявка #{answer_id})')
-        return False
-    except Exception as e:
-        logger.error(f'❌ Ошибка в синхронной обертке: {e}')
-        logger.error(traceback.format_exc())
-        return False
 
 # ============================================================
 # FLASK
@@ -200,13 +195,16 @@ def notify():
             logger.error('❌ Бот не готов')
             return jsonify({"success": False, "error": "Bot not ready"}), 503
         
-        # Отправляем синхронно
-        success = send_notification_sync(survey_type, answer_data, answer_id, date_str)
+        # Добавляем в очередь вместо прямой отправки
+        notification_queue.put({
+            'survey_type': survey_type,
+            'answer_data': answer_data,
+            'answer_id': answer_id,
+            'date_str': date_str
+        })
         
-        if success:
-            return jsonify({"success": True}), 200
-        else:
-            return jsonify({"success": False, "error": "Failed to send"}), 500
+        logger.info(f'📥 Уведомление добавлено в очередь (заявка #{answer_id})')
+        return jsonify({"success": True, "message": "Queued"}), 200
         
     except Exception as e:
         logger.error(f'❌ Ошибка в /notify: {e}')
@@ -226,7 +224,8 @@ def status():
     return jsonify({
         "bot_ready": client_ready,
         "bot_name": client.user.name if client.user else None,
-        "guilds": len(client.guilds) if client.user else 0
+        "guilds": len(client.guilds) if client.user else 0,
+        "queue_size": notification_queue.qsize()
     })
 
 # ============================================================
