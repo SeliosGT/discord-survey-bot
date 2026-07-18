@@ -52,7 +52,6 @@ intents.dm_messages = True
 client = discord.Client(intents=intents)
 loop = None
 client_ready = False
-bot_started = False
 
 # ============================================================
 # СОБЫТИЕ: БОТ ГОТОВ
@@ -60,13 +59,11 @@ bot_started = False
 
 @client.event
 async def on_ready():
-    global client_ready, bot_started
+    global client_ready
     client_ready = True
-    bot_started = True
     logger.info(f'✅ Бот {client.user.name} запущен!')
     logger.info(f'📊 На серверах: {len(client.guilds)}')
     
-    # Пробуем отправить приветствие
     try:
         user = await client.fetch_user(ADMIN_USER_ID)
         await user.send('🤖 **Бот запущен!** Готов принимать уведомления.')
@@ -99,7 +96,6 @@ def run_bot():
 # ============================================================
 
 def send_notification(survey_type, answer_data, answer_id, date_str):
-    """Синхронная отправка уведомления"""
     try:
         logger.info(f'📤 Отправка уведомления (заявка #{answer_id})')
         
@@ -140,7 +136,6 @@ def send_notification(survey_type, answer_data, answer_id, date_str):
             style=discord.ButtonStyle.link
         ))
         
-        # Отправляем через event loop бота
         future = asyncio.run_coroutine_threadsafe(
             user.send(
                 content=f"🔔 **Новая заявка #{answer_id}!**",
@@ -205,30 +200,23 @@ def status():
     })
 
 # ============================================================
-# ЗАПУСК БОТА ВНУТРИ ВОРКЕРА
-# ============================================================
-
-# Запускаем бота в отдельном потоке
-logger.info('🚀 Запуск бота в фоне...')
-bot_thread = threading.Thread(target=run_bot, daemon=True)
-bot_thread.start()
-
-# Даём боту время на запуск
-logger.info('⏳ Ожидание запуска бота...')
-time.sleep(5)
-
-if client_ready:
-    logger.info('✅ Бот успешно запущен!')
-else:
-    logger.warning('⚠️ Бот не готов через 5 секунд, но продолжается...')
-
-logger.info('🌐 Flask готов к работе')
-
-# ============================================================
-# ВАЖНО: НЕ ЗАПУСКАЕМ FLASK ЧЕРЕЗ app.run()
-# GUNICORN ЭТО ДЕЛАЕТ ЗА НАС
+# ЗАПУСК — БЕЗ GUNICORN!
 # ============================================================
 
 if __name__ == '__main__':
-    logger.info('🚀 Прямой запуск через python bot.py')
-    app.run(host='0.0.0.0', port=8080)
+    logger.info('🚀 Запуск бота в фоне...')
+    
+    # Запускаем бота
+    bot_thread = threading.Thread(target=run_bot, daemon=True)
+    bot_thread.start()
+    
+    # Ждём 5 секунд для запуска
+    time.sleep(5)
+    
+    if client_ready:
+        logger.info('✅ Бот успешно запущен!')
+    else:
+        logger.warning('⚠️ Бот не готов через 5 секунд')
+    
+    logger.info('🌐 Запуск Flask на порту 10000...')
+    app.run(host='0.0.0.0', port=10000)
