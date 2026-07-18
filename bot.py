@@ -1,6 +1,5 @@
 import discord
 import os
-import requests
 import json
 from datetime import datetime, timezone
 import asyncio
@@ -10,7 +9,7 @@ import logging
 import traceback
 import time
 import sys
-from queue import Queue
+from collections import deque
 
 # ============================================================
 # НАСТРОЙКА ЛОГИРОВАНИЯ
@@ -50,129 +49,98 @@ intents.message_content = True
 intents.members = True
 intents.dm_messages = True
 
-client = discord.Client(intents=intents)
-client_ready = False
-notification_queue = Queue()
-user_cache = None  # Кешируем пользователя
-
-# ============================================================
-# СОБЫТИЕ: БОТ ГОТОВ
-# ============================================================
-
-@client.event
-async def on_ready():
-    global client_ready, user_cache
-    client_ready = True
-    logger.info(f'✅ Бот {client.user.name} запущен!')
-    logger.info(f'📊 На серверах: {len(client.guilds)}')
+class NotificationBot(discord.Client):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.admin_user = None
+        self.notification_queue = deque()
+        self.processing_task = None
+        
+    async def setup_hook(self):
+        """Запускается перед тем как бот подключится"""
+        self.processing_task = self.loop.create_task(self.process_notifications())
+        logger.info('🔄 Задача обработки уведомлений создана')
     
-    try:
-        # Кешируем пользователя при старте
-        user_cache = await client.fetch_user(ADMIN_USER_ID)
-        await user_cache.send('🤖 **Бот запущен!** Готов принимать уведомления.')
-        logger.info('✅ Приветствие отправлено админу в ЛС')
-    except Exception as e:
-        logger.warning(f'⚠️ Не удалось отправить приветствие: {e}')
-
-@client.event
-async def on_message(message):
-    if message.author.bot:
-        return
-
-# ============================================================
-# ЗАПУСК БОТА
-# ============================================================
-
-async def process_notifications():
-    """Фоновая задача для обработки уведомлений"""
-    global user_cache
-    
-    while True:
+    async def on_ready(self):
+        logger.info(f'✅ Бот {self.user.name} запущен!')
+        logger.info(f'📊 На серверах: {len(self.guilds)}')
+        
         try:
-            # Проверяем очередь
-            if not notification_queue.empty():
-                notification_data = notification_queue.get()
-                logger.info(f'📤 Отправка уведомления из очереди (заявка #{notification_data["answer_id"]})')
-                
-                # Обновляем кеш пользователя если нужно
-                if not user_cache:
-                    try:
-                        user_cache = await client.fetch_user(ADMIN_USER_ID)
-                    except Exception as e:
-                        logger.error(f'❌ Не удалось получить пользователя: {e}')
-                        continue
-                
-                # Формируем сообщение
-                type_names = {
-                    'discipline': '🏛️ Дисциплинарный инспектор',
-                    'hr': '👔 HR-менеджер'
-                }
-                type_name = type_names.get(notification_data['survey_type'], '📋 Новая заявка')
-                
-                embed = discord.Embed(
-                    title="🔔 Новая заявка!",
-                    color=0x5865F2,
-                    timestamp=datetime.now(timezone.utc)
-                )
-                
-                embed.add_field(name="🆔 Номер", value=f"#{notification_data['answer_id']}", inline=True)
-                embed.add_field(name="📋 Должность", value=type_name, inline=True)
-                embed.add_field(name="👤 IC", value=notification_data['answer_data'].get('q1', '—'), inline=True)
-                embed.add_field(name="👤 OOC", value=notification_data['answer_data'].get('q2', '—'), inline=True)
-                embed.add_field(name="📅 Дата", value=notification_data['date_str'], inline=True)
-                embed.add_field(name="🔗 Ссылка", value=f"[Админ-панель]({SERVER_URL}/admin.html)", inline=False)
-                
-                embed.set_footer(text="by Rubi Antwoord")
-                
-                view = discord.ui.View()
-                view.add_item(discord.ui.Button(
-                    label="📋 Открыть админку",
-                    url=f"{SERVER_URL}/admin.html",
-                    style=discord.ButtonStyle.link
-                ))
-                
-                # Отправляем
-                await user_cache.send(
-                    content=f"🔔 **Новая заявка #{notification_data['answer_id']}!**",
-                    embed=embed,
-                    view=view
-                )
-                
-                logger.info(f'✅ Уведомление отправлено (заявка #{notification_data["answer_id"]})')
-                notification_queue.task_done()
-            
-            await asyncio.sleep(0.5)  # Проверяем очередь каждые 500мс
-            
+            self.admin_user = await self.fetch_user(ADMIN_USER_ID)
+            await self.admin_user.send('🤖 **Бот запущен!** Готов принимать уведомления.')
+            logger.info('✅ Приветствие отправлено админу в ЛС')
         except Exception as e:
-            logger.error(f'❌ Ошибка обработки уведомления: {e}')
-            logger.error(traceback.format_exc())
-            await asyncio.sleep(1)  # Ждем перед повторной попыткой
-
-def run_bot():
-    try:
-        logger.info('🚀 Запуск бота...')
+            logger.warning(f'⚠️ Не удалось отправить приветствие: {e}')
+    
+    async def on_message(self, message):
+        if message.author.bot:
+            return
+    
+    async def process_notifications(self):
+        """Фоновая обработка очереди уведомлений"""
+        await self.wait_until_ready()
+        logger.info('🔄 Обработчик очереди запущен')
         
-        # Запускаем фоновую задачу при старте
-        @client.event
-        async def on_ready_inner():
-            global client_ready, user_cache
-            client_ready = True
-            logger.info(f'✅ Бот {client.user.name} запущен!')
-            logger.info(f'📊 На серверах: {len(client.guilds)}')
-            
+        while not self.is_closed():
             try:
-                user_cache = await client.fetch_user(ADMIN_USER_ID)
-                await user_cache.send('🤖 **Бот запущен!** Готов принимать уведомления.')
-                logger.info('✅ Приветствие отправлено админу в ЛС')
-                # Запускаем обработчик очереди
-                client.loop.create_task(process_notifications())
+                if self.notification_queue and self.admin_user:
+                    data = self.notification_queue.popleft()
+                    logger.info(f'📤 Отправка из очереди: заявка #{data["answer_id"]}')
+                    
+                    type_names = {
+                        'discipline': '🏛️ Дисциплинарный инспектор',
+                        'hr': '👔 HR-менеджер'
+                    }
+                    type_name = type_names.get(data['survey_type'], '📋 Новая заявка')
+                    
+                    embed = discord.Embed(
+                        title="🔔 Новая заявка!",
+                        color=0x5865F2,
+                        timestamp=datetime.now(timezone.utc)
+                    )
+                    
+                    embed.add_field(name="🆔 Номер", value=f"#{data['answer_id']}", inline=True)
+                    embed.add_field(name="📋 Должность", value=type_name, inline=True)
+                    embed.add_field(name="👤 IC", value=data['answer_data'].get('q1', '—'), inline=True)
+                    embed.add_field(name="👤 OOC", value=data['answer_data'].get('q2', '—'), inline=True)
+                    embed.add_field(name="📅 Дата", value=data['date_str'], inline=True)
+                    embed.add_field(name="🔗 Ссылка", value=f"[Админ-панель]({SERVER_URL}/admin.html)", inline=False)
+                    
+                    embed.set_footer(text="by Rubi Antwoord")
+                    
+                    view = discord.ui.View()
+                    view.add_item(discord.ui.Button(
+                        label="📋 Открыть админку",
+                        url=f"{SERVER_URL}/admin.html",
+                        style=discord.ButtonStyle.link
+                    ))
+                    
+                    await self.admin_user.send(
+                        content=f"🔔 **Новая заявка #{data['answer_id']}!**",
+                        embed=embed,
+                        view=view
+                    )
+                    
+                    logger.info(f'✅ Уведомление отправлено (заявка #{data["answer_id"]})')
+                
+                await asyncio.sleep(0.5)
+                
             except Exception as e:
-                logger.warning(f'⚠️ Не удалось отправить приветствие: {e}')
-        
-        client.run(TOKEN)
-    except Exception as e:
-        logger.error(f'❌ Бот упал: {e}')
-        logger.error(traceback.format_exc())
+                logger.error(f'❌ Ошибка обработки уведомления: {e}')
+                logger.error(traceback.format_exc())
+                await asyncio.sleep(1)
+    
+    def add_notification(self, survey_type, answer_data, answer_id, date_str):
+        """Добавление уведомления в очередь"""
+        self.notification_queue.append({
+            'survey_type': survey_type,
+            'answer_data': answer_data,
+            'answer_id': answer_id,
+            'date_str': date_str
+        })
+        logger.info(f'📥 Уведомление #{answer_id} добавлено в очередь (всего: {len(self.notification_queue)})')
+
+client = NotificationBot(intents=intents)
 
 # ============================================================
 # FLASK
@@ -189,22 +157,24 @@ def notify():
         answer_id = data.get('answer_id')
         date_str = data.get('date_str')
         
-        logger.info(f'📨 Запрос на уведомление: заявка #{answer_id}')
+        logger.info(f'📨 Получен запрос: заявка #{answer_id}')
         
-        if not client_ready:
+        if not client.is_ready():
             logger.error('❌ Бот не готов')
             return jsonify({"success": False, "error": "Bot not ready"}), 503
         
-        # Добавляем в очередь вместо прямой отправки
-        notification_queue.put({
-            'survey_type': survey_type,
-            'answer_data': answer_data,
-            'answer_id': answer_id,
-            'date_str': date_str
-        })
+        if not client.admin_user:
+            logger.error('❌ Админ не найден')
+            return jsonify({"success": False, "error": "Admin user not found"}), 503
         
-        logger.info(f'📥 Уведомление добавлено в очередь (заявка #{answer_id})')
-        return jsonify({"success": True, "message": "Queued"}), 200
+        # Добавляем в очередь бота
+        client.add_notification(survey_type, answer_data, answer_id, date_str)
+        
+        return jsonify({
+            "success": True, 
+            "message": "Notification queued",
+            "queue_size": len(client.notification_queue)
+        }), 200
         
     except Exception as e:
         logger.error(f'❌ Ошибка в /notify: {e}')
@@ -222,30 +192,43 @@ def ping():
 @app.route('/status')
 def status():
     return jsonify({
-        "bot_ready": client_ready,
+        "bot_ready": client.is_ready(),
         "bot_name": client.user.name if client.user else None,
         "guilds": len(client.guilds) if client.user else 0,
-        "queue_size": notification_queue.qsize()
+        "queue_size": len(client.notification_queue),
+        "has_admin": client.admin_user is not None
     })
 
 # ============================================================
 # ЗАПУСК
 # ============================================================
 
+def run_bot():
+    try:
+        logger.info('🚀 Запуск бота...')
+        client.run(TOKEN)
+    except Exception as e:
+        logger.error(f'❌ Бот упал: {e}')
+        logger.error(traceback.format_exc())
+
 if __name__ == '__main__':
     logger.info('🚀 Запуск бота в фоне...')
     
-    # Запускаем бота
+    # Запускаем бота в отдельном потоке
     bot_thread = threading.Thread(target=run_bot, daemon=True)
     bot_thread.start()
     
-    # Ждем 5 секунд для запуска
-    time.sleep(5)
+    # Ждем запуска
+    logger.info('⏳ Ожидание готовности бота...')
+    timeout = 30
+    start_time = time.time()
+    while not client.is_ready() and (time.time() - start_time) < timeout:
+        time.sleep(1)
     
-    if client_ready:
+    if client.is_ready():
         logger.info('✅ Бот успешно запущен!')
     else:
-        logger.warning('⚠️ Бот не готов через 5 секунд')
+        logger.warning(f'⚠️ Бот не готов после {timeout} секунд')
     
     logger.info('🌐 Запуск Flask на порту 10000...')
     app.run(host='0.0.0.0', port=10000)
