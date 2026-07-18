@@ -11,6 +11,7 @@ import time
 import sys
 import re
 from collections import deque
+import signal
 
 # ============================================================
 # НАСТРОЙКА ЛОГИРОВАНИЯ
@@ -56,6 +57,8 @@ class NotificationBot(discord.Client):
         self.admin_user = None
         self.notification_queue = deque()
         self.processing_task = None
+        self.processed_ids = set()  # Защита от дублей
+        self.shutting_down = False
         
     async def setup_hook(self):
         self.processing_task = self.loop.create_task(self.process_notifications())
@@ -78,24 +81,34 @@ class NotificationBot(discord.Client):
     
     def format_date_with_offset(self, date_str):
         """Добавляет 3 часа к дате и форматирует"""
+        if not date_str:
+            return "неизвестно"
+        
         logger.info(f'📅 Обработка даты: "{date_str}"')
         
         # Убираем (МСК) если есть
         clean_date = re.sub(r'\s*\(МСК\)\s*', '', date_str)
         
-        # Ищем время в строке
+        # Ищем время в строке (HH:MM)
         time_match = re.search(r'(\d{2}):(\d{2})', clean_date)
         if time_match:
             hours = int(time_match.group(1))
             minutes = int(time_match.group(2))
             new_hours = (hours + 3) % 24
             
-            # Заменяем часы
+            # Заменяем часы (сохраняя ведущие нули)
             formatted_date = clean_date[:time_match.start(1)] + f'{new_hours:02d}:{minutes:02d}' + clean_date[time_match.end(2):]
             logger.info(f'✅ {date_str} -> {formatted_date}')
             return formatted_date
-        else:
-            logger.warning(f'⚠️ Не найдено время в дате: {date_str}')
+        
+        # Запасной вариант: если время не найдено, пробуем распарсить через datetime
+        try:
+            dt = datetime.strptime(clean_date.strip(), '%d.%m.%Y %H:%M')
+            dt = dt + timedelta(hours=3)
+            return dt.strftime('%d.%m.%Y %H:%M')
+        except ValueError:
+            # Если совсем не получилось — возвращаем исходную строку с предупреждением
+            logger.warning(f'⚠️ Не удалось распарсить дату: {date_str}')
             return date_str
     
     def create_notification_embed(self, data):
@@ -115,8 +128,9 @@ class NotificationBot(discord.Client):
         
         ic_name = answer_data.get('q1', 'Не указано')
         ooc_name = answer_data.get('q2', 'Не указано')
+        motivation = answer_data.get('motivation', '')
         
-        # Создаем красивое текстовое описание
+        # Формируем описание
         description = (
             f"```ansi\n"
             f"🆔 Номер заявки      │ #{answer_id}\n"
@@ -135,6 +149,14 @@ class NotificationBot(discord.Client):
             timestamp=datetime.now(timezone.utc)
         )
         
+        # Добавляем мотивацию, если есть
+        if motivation and len(motivation) > 10:
+            embed.add_field(
+                name="📜 Мотивация",
+                value=motivation[:300] + ('...' if len(motivation) > 300 else ''),
+                inline=False
+            )
+        
         embed.set_footer(text="by Rubi Antwoord")
         
         return embed
@@ -143,11 +165,18 @@ class NotificationBot(discord.Client):
         await self.wait_until_ready()
         logger.info('🔄 Обработчик очереди запущен')
         
-        while not self.is_closed():
+        while not self.is_closed() and not self.shutting_down:
             try:
                 if self.notification_queue and self.admin_user:
                     data = self.notification_queue.popleft()
-                    logger.info(f'📤 Отправка из очереди: заявка #{data["answer_id"]}')
+                    answer_id = data["answer_id"]
+                    
+                    # Защита от дублей
+                    if answer_id in self.processed_ids:
+                        logger.info(f'⏩ Заявка #{answer_id} уже обработана, пропускаем')
+                        continue
+                    
+                    logger.info(f'📤 Отправка из очереди: заявка #{answer_id}')
                     
                     embed = self.create_notification_embed(data)
                     
@@ -159,21 +188,45 @@ class NotificationBot(discord.Client):
                     ))
                     
                     await self.admin_user.send(
-                        content=f"🔔 **Поступила новая заявка #{data['answer_id']}!**",
+                        content=f"🔔 **Поступила новая заявка #{answer_id}!**",
                         embed=embed,
                         view=view
                     )
                     
-                    logger.info(f'✅ Уведомление отправлено (заявка #{data["answer_id"]})')
+                    self.processed_ids.add(answer_id)
+                    logger.info(f'✅ Уведомление отправлено (заявка #{answer_id})')
+                    
+                    # Ограничиваем размер кеша обработанных ID
+                    if len(self.processed_ids) > 1000:
+                        self.processed_ids.clear()
                 
                 await asyncio.sleep(0.5)
                 
+            except discord.HTTPException as e:
+                if e.status == 429:
+                    logger.warning(f'⏳ Rate limit, ждём...')
+                    await asyncio.sleep(5)
+                else:
+                    logger.error(f'❌ Ошибка HTTP: {e.status} - {e.text}')
+                    await asyncio.sleep(1)
             except Exception as e:
                 logger.error(f'❌ Ошибка обработки уведомления: {e}')
                 logger.error(traceback.format_exc())
                 await asyncio.sleep(1)
     
     def add_notification(self, survey_type, answer_data, answer_id, date_str):
+        """Добавляет уведомление в очередь"""
+        # Проверяем, не было ли уже такой заявки
+        if answer_id in self.processed_ids:
+            logger.info(f'⏩ Заявка #{answer_id} уже обработана, игнорируем')
+            return False
+        
+        # Проверяем, нет ли уже в очереди
+        for item in self.notification_queue:
+            if item['answer_id'] == answer_id:
+                logger.info(f'⏩ Заявка #{answer_id} уже в очереди, игнорируем')
+                return False
+        
         self.notification_queue.append({
             'survey_type': survey_type,
             'answer_data': answer_data,
@@ -181,8 +234,23 @@ class NotificationBot(discord.Client):
             'date_str': date_str
         })
         logger.info(f'📥 Уведомление #{answer_id} добавлено в очередь (всего: {len(self.notification_queue)})')
+        return True
 
 client = NotificationBot(intents=intents)
+
+# ============================================================
+# ГРАЦИОЗНОЕ ЗАВЕРШЕНИЕ
+# ============================================================
+
+def handle_shutdown(signum, frame):
+    logger.info('🛑 Получен сигнал завершения')
+    client.shutting_down = True
+    if client.processing_task:
+        client.processing_task.cancel()
+    sys.exit(0)
+
+signal.signal(signal.SIGINT, handle_shutdown)
+signal.signal(signal.SIGTERM, handle_shutdown)
 
 # ============================================================
 # FLASK
@@ -210,11 +278,11 @@ def notify():
             logger.error('❌ Админ не найден')
             return jsonify({"success": False, "error": "Admin user not found"}), 503
         
-        client.add_notification(survey_type, answer_data, answer_id, date_str)
+        added = client.add_notification(survey_type, answer_data, answer_id, date_str)
         
         return jsonify({
             "success": True, 
-            "message": "Notification queued",
+            "message": "Notification queued" if added else "Already processed",
             "queue_size": len(client.notification_queue)
         }), 200
         
@@ -238,7 +306,8 @@ def status():
         "bot_name": client.user.name if client.user else None,
         "guilds": len(client.guilds) if client.user else 0,
         "queue_size": len(client.notification_queue),
-        "has_admin": client.admin_user is not None
+        "has_admin": client.admin_user is not None,
+        "processed_count": len(client.processed_ids)
     })
 
 # ============================================================
