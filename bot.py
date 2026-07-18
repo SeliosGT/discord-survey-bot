@@ -10,7 +10,6 @@ import logging
 import traceback
 import time
 import sys
-import atexit
 
 # ============================================================
 # НАСТРОЙКА ЛОГИРОВАНИЯ
@@ -81,7 +80,7 @@ async def on_message(message):
         return
 
 # ============================================================
-# ЗАПУСК БОТА В ОТДЕЛЬНОМ ПОТОКЕ
+# ЗАПУСК БОТА
 # ============================================================
 
 def run_bot():
@@ -96,20 +95,18 @@ def run_bot():
         logger.error(traceback.format_exc())
 
 # ============================================================
-# ФУНКЦИЯ: ОТПРАВКА УВЕДОМЛЕНИЯ (ПРЯМОЙ ВЫЗОВ)
+# ФУНКЦИЯ: ОТПРАВКА УВЕДОМЛЕНИЯ
 # ============================================================
 
 def send_notification(survey_type, answer_data, answer_id, date_str):
-    """СИНХРОННАЯ отправка уведомления (без asyncio)"""
+    """Синхронная отправка уведомления"""
     try:
         logger.info(f'📤 Отправка уведомления (заявка #{answer_id})')
         
-        # Проверяем, что бот готов
         if not client_ready:
             logger.error('❌ Бот не готов к отправке')
             return False
         
-        # Получаем пользователя
         user = client.get_user(ADMIN_USER_ID)
         if not user:
             logger.error('❌ Пользователь не найден в кеше')
@@ -121,7 +118,6 @@ def send_notification(survey_type, answer_data, answer_id, date_str):
         }
         type_name = type_names.get(survey_type, '📋 Новая заявка')
         
-        # Создаём embed
         embed = discord.Embed(
             title="🔔 Новая заявка!",
             color=0x5865F2,
@@ -144,7 +140,7 @@ def send_notification(survey_type, answer_data, answer_id, date_str):
             style=discord.ButtonStyle.link
         ))
         
-        # Отправляем сообщение (синхронно через asyncio)
+        # Отправляем через event loop бота
         future = asyncio.run_coroutine_threadsafe(
             user.send(
                 content=f"🔔 **Новая заявка #{answer_id}!**",
@@ -154,14 +150,10 @@ def send_notification(survey_type, answer_data, answer_id, date_str):
             loop
         )
         
-        # Ждём результат с таймаутом
         future.result(timeout=30)
         logger.info(f'✅ Уведомление отправлено (заявка #{answer_id})')
         return True
         
-    except asyncio.TimeoutError:
-        logger.error(f'⏰ Таймаут при отправке (заявка #{answer_id})')
-        return False
     except Exception as e:
         logger.error(f'❌ Ошибка отправки: {e}')
         logger.error(traceback.format_exc())
@@ -184,12 +176,8 @@ def notify():
         
         logger.info(f'📨 Запрос на уведомление: заявка #{answer_id}')
         
-        # Отправляем уведомление в отдельном потоке
         def run_sync():
-            try:
-                send_notification(survey_type, answer_data, answer_id, date_str)
-            except Exception as e:
-                logger.error(f'❌ Ошибка в потоке: {e}')
+            send_notification(survey_type, answer_data, answer_id, date_str)
         
         thread = threading.Thread(target=run_sync, daemon=True)
         thread.start()
@@ -212,50 +200,35 @@ def ping():
 def status():
     return jsonify({
         "bot_ready": client_ready,
-        "bot_started": bot_started,
         "bot_name": client.user.name if client.user else None,
-        "guilds": len(client.guilds) if client.user else 0,
-        "admin_id": ADMIN_USER_ID
+        "guilds": len(client.guilds) if client.user else 0
     })
 
 # ============================================================
-# ЗАПУСК БОТА
+# ЗАПУСК БОТА ВНУТРИ ВОРКЕРА
 # ============================================================
 
-logger.info('🚀 Инициализация бота...')
-
 # Запускаем бота в отдельном потоке
+logger.info('🚀 Запуск бота в фоне...')
 bot_thread = threading.Thread(target=run_bot, daemon=True)
 bot_thread.start()
 
-# Ждём запуска бота
+# Даём боту время на запуск
 logger.info('⏳ Ожидание запуска бота...')
-wait_time = 0
-while wait_time < 20:
-    if client_ready:
-        break
-    time.sleep(1)
-    wait_time += 1
-    logger.info(f'⏳ Ждём... {wait_time}с')
+time.sleep(5)
 
 if client_ready:
     logger.info('✅ Бот успешно запущен!')
 else:
-    logger.warning('⚠️ Бот не готов через 20 секунд')
-    logger.warning('⚠️ Проверьте токен и интернет-соединение')
+    logger.warning('⚠️ Бот не готов через 5 секунд, но продолжается...')
 
 logger.info('🌐 Flask готов к работе')
 
 # ============================================================
-# ЗАВЕРШЕНИЕ
+# ВАЖНО: НЕ ЗАПУСКАЕМ FLASK ЧЕРЕЗ app.run()
+# GUNICORN ЭТО ДЕЛАЕТ ЗА НАС
 # ============================================================
 
-def shutdown():
-    logger.info('🛑 Остановка бота...')
-    if client.is_ready():
-        asyncio.run_coroutine_threadsafe(client.close(), loop)
-
-atexit.register(shutdown)
-
 if __name__ == '__main__':
+    logger.info('🚀 Прямой запуск через python bot.py')
     app.run(host='0.0.0.0', port=8080)
