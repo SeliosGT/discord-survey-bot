@@ -10,6 +10,7 @@ import logging
 import traceback
 import time
 import sys
+import atexit
 
 # ============================================================
 # НАСТРОЙКА ЛОГИРОВАНИЯ
@@ -37,6 +38,9 @@ if ADMIN_USER_ID == 0:
     logger.error("❌ ADMIN_USER_ID не найден!")
     sys.exit(1)
 
+logger.info(f'🔑 Токен найден: {TOKEN[:10]}...')
+logger.info(f'👤 ADMIN_USER_ID: {ADMIN_USER_ID}')
+
 # ============================================================
 # НАСТРОЙКА DISCORD
 # ============================================================
@@ -49,6 +53,7 @@ intents.dm_messages = True
 client = discord.Client(intents=intents)
 loop = None
 client_ready = False
+bot_started = False
 
 # ============================================================
 # СОБЫТИЕ: БОТ ГОТОВ
@@ -56,8 +61,9 @@ client_ready = False
 
 @client.event
 async def on_ready():
-    global client_ready
+    global client_ready, bot_started
     client_ready = True
+    bot_started = True
     logger.info(f'✅ Бот {client.user.name} запущен!')
     logger.info(f'📊 На серверах: {len(client.guilds)}')
     
@@ -80,9 +86,10 @@ async def on_message(message):
 
 def run_bot():
     global loop
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
     try:
+        logger.info('🚀 Запуск бота...')
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
         client.run(TOKEN)
     except Exception as e:
         logger.error(f'❌ Бот упал: {e}')
@@ -96,12 +103,12 @@ async def send_notification_async(survey_type, answer_data, answer_id, date_str)
     try:
         if not client_ready:
             logger.info('⏳ Ждём готовности бота...')
-            for i in range(10):
+            for i in range(15):
                 if client_ready:
                     break
                 await asyncio.sleep(1)
             if not client_ready:
-                logger.error('❌ Бот не готов после 10 секунд ожидания')
+                logger.error('❌ Бот не готов после 15 секунд ожидания')
                 return False
         
         user = await client.fetch_user(ADMIN_USER_ID)
@@ -210,26 +217,57 @@ def ping():
 def status():
     return jsonify({
         "bot_ready": client_ready,
-        "bot_name": client.user.name if client.user else None
+        "bot_started": bot_started,
+        "bot_name": client.user.name if client.user else None,
+        "guilds": len(client.guilds) if client.user else 0
     })
 
 # ============================================================
-# ЗАПУСК
+# ЗАПУСК БОТА — ЭТА ЧАСТЬ ВЫПОЛНЯЕТСЯ ПРИ ИМПОРТЕ
 # ============================================================
 
+logger.info('🚀 Инициализация бота...')
+
+# Запускаем бота в отдельном потоке
+bot_thread = threading.Thread(target=run_bot, daemon=True)
+bot_thread.start()
+
+# Ждём, пока бот запустится
+logger.info('⏳ Ожидание запуска бота...')
+
+# Даём боту время на запуск (максимум 15 секунд)
+wait_time = 0
+while wait_time < 15:
+    if client_ready:
+        break
+    time.sleep(1)
+    wait_time += 1
+    logger.info(f'⏳ Ждём... {wait_time}с')
+
+if client_ready:
+    logger.info('✅ Бот успешно запущен!')
+else:
+    logger.warning('⚠️ Бот не готов через 15 секунд, но продолжаем...')
+    logger.warning('⚠️ Проверьте токен и интернет-соединение')
+
+logger.info('🌐 Flask готов к работе')
+
+# ============================================================
+# ПРИ ЗАВЕРШЕНИИ — ОСТАНАВЛИВАЕМ БОТА
+# ============================================================
+
+def shutdown():
+    logger.info('🛑 Остановка бота...')
+    if client.is_ready():
+        asyncio.run_coroutine_threadsafe(client.close(), loop)
+
+atexit.register(shutdown)
+
+# ============================================================
+# ВАЖНО: НЕ ЗАПУСКАЕМ FLASK ЧЕРЕЗ app.run() — GUNICORN ЭТО ДЕЛАЕТ
+# ============================================================
+
+# Если этот файл запускается напрямую (не через Gunicorn) — запускаем Flask
 if __name__ == '__main__':
-    logger.info('🚀 Запуск...')
-    
-    # Запускаем бота
-    bot_thread = threading.Thread(target=run_bot, daemon=True)
-    bot_thread.start()
-    
-    # Ждём, пока бот запустится
-    logger.info('⏳ Ожидание запуска бота...')
-    time.sleep(5)
-    
-    if not client_ready:
-        logger.warning('⚠️ Бот не готов через 5 секунд, но продолжаем...')
-    
-    logger.info('🌐 Запуск Flask...')
+    logger.info('🚀 Прямой запуск (не через Gunicorn)')
     app.run(host='0.0.0.0', port=8080)
