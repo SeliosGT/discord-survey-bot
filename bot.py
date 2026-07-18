@@ -49,37 +49,6 @@ intents.message_content = True
 intents.members = True
 intents.dm_messages = True
 
-def format_datetime_msk(date_str):
-    """Форматирует дату, добавляя 3 часа для МСК"""
-    try:
-        formats = [
-            '%Y-%m-%d %H:%M:%S',
-            '%Y-%m-%d %H:%M',
-            '%Y-%m-%d',
-            '%d.%m.%Y %H:%M:%S',
-            '%d.%m.%Y %H:%M',
-            '%d.%m.%Y'
-        ]
-        
-        dt = None
-        for fmt in formats:
-            try:
-                dt = datetime.strptime(date_str, fmt)
-                break
-            except ValueError:
-                continue
-        
-        if dt is None:
-            return date_str
-        
-        # Просто добавляем 3 часа
-        dt_msk = dt + timedelta(hours=3)
-        
-        return dt_msk.strftime('%d.%m.%Y %H:%M')
-    except Exception as e:
-        logger.warning(f'⚠️ Ошибка форматирования даты: {e}')
-        return date_str
-
 class NotificationBot(discord.Client):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -113,7 +82,28 @@ class NotificationBot(discord.Client):
         answer_data = data['answer_data']
         date_str = data['date_str']
         
-        formatted_date = format_datetime_msk(date_str)
+        # Конвертируем время: добавляем 3 часа к тому что пришло
+        try:
+            # Пробуем распарсить дату
+            dt = datetime.strptime(date_str, '%Y-%m-%d %H:%M:%S')
+        except:
+            try:
+                dt = datetime.strptime(date_str, '%Y-%m-%d %H:%M')
+            except:
+                try:
+                    dt = datetime.strptime(date_str, '%d.%m.%Y %H:%M:%S')
+                except:
+                    try:
+                        dt = datetime.strptime(date_str, '%d.%m.%Y %H:%M')
+                    except:
+                        # Если не получилось - используем как есть
+                        formatted_date = date_str
+                        dt = None
+        
+        if dt:
+            # Добавляем 3 часа
+            dt = dt + timedelta(hours=3)
+            formatted_date = dt.strftime('%d.%m.%Y %H:%M')
         
         type_names = {
             'discipline': '🏛️ Дисциплинарный инспектор',
@@ -208,6 +198,7 @@ def notify():
         date_str = data.get('date_str')
         
         logger.info(f'📨 Получен запрос: заявка #{answer_id}')
+        logger.info(f'📅 Исходная дата: {date_str}')
         
         if not client.is_ready():
             logger.error('❌ Бот не готов')
