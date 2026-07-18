@@ -81,7 +81,7 @@ async def on_message(message):
         return
 
 # ============================================================
-# ЗАПУСК БОТА
+# ЗАПУСК БОТА В ОТДЕЛЬНОМ ПОТОКЕ
 # ============================================================
 
 def run_bot():
@@ -96,22 +96,24 @@ def run_bot():
         logger.error(traceback.format_exc())
 
 # ============================================================
-# ФУНКЦИЯ: ОТПРАВКА УВЕДОМЛЕНИЯ
+# ФУНКЦИЯ: ОТПРАВКА УВЕДОМЛЕНИЯ (ПРЯМОЙ ВЫЗОВ)
 # ============================================================
 
-async def send_notification_async(survey_type, answer_data, answer_id, date_str):
+def send_notification(survey_type, answer_data, answer_id, date_str):
+    """СИНХРОННАЯ отправка уведомления (без asyncio)"""
     try:
-        if not client_ready:
-            logger.info('⏳ Ждём готовности бота...')
-            for i in range(15):
-                if client_ready:
-                    break
-                await asyncio.sleep(1)
-            if not client_ready:
-                logger.error('❌ Бот не готов после 15 секунд ожидания')
-                return False
+        logger.info(f'📤 Отправка уведомления (заявка #{answer_id})')
         
-        user = await client.fetch_user(ADMIN_USER_ID)
+        # Проверяем, что бот готов
+        if not client_ready:
+            logger.error('❌ Бот не готов к отправке')
+            return False
+        
+        # Получаем пользователя
+        user = client.get_user(ADMIN_USER_ID)
+        if not user:
+            logger.error('❌ Пользователь не найден в кеше')
+            return False
         
         type_names = {
             'discipline': '🏛️ Дисциплинарный инспектор',
@@ -119,6 +121,7 @@ async def send_notification_async(survey_type, answer_data, answer_id, date_str)
         }
         type_name = type_names.get(survey_type, '📋 Новая заявка')
         
+        # Создаём embed
         embed = discord.Embed(
             title="🔔 Новая заявка!",
             color=0x5865F2,
@@ -141,37 +144,28 @@ async def send_notification_async(survey_type, answer_data, answer_id, date_str)
             style=discord.ButtonStyle.link
         ))
         
-        await user.send(
-            content=f"🔔 **Новая заявка #{answer_id}!**",
-            embed=embed,
-            view=view
+        # Отправляем сообщение (синхронно через asyncio)
+        future = asyncio.run_coroutine_threadsafe(
+            user.send(
+                content=f"🔔 **Новая заявка #{answer_id}!**",
+                embed=embed,
+                view=view
+            ),
+            loop
         )
+        
+        # Ждём результат с таймаутом
+        future.result(timeout=30)
         logger.info(f'✅ Уведомление отправлено (заявка #{answer_id})')
         return True
         
+    except asyncio.TimeoutError:
+        logger.error(f'⏰ Таймаут при отправке (заявка #{answer_id})')
+        return False
     except Exception as e:
         logger.error(f'❌ Ошибка отправки: {e}')
         logger.error(traceback.format_exc())
         return False
-
-# ============================================================
-# СИНХРОННАЯ ОБЁРТКА
-# ============================================================
-
-def send_notification_sync(survey_type, answer_data, answer_id, date_str):
-    try:
-        logger.info(f'📤 Отправка уведомления (заявка #{answer_id})')
-        future = asyncio.run_coroutine_threadsafe(
-            send_notification_async(survey_type, answer_data, answer_id, date_str),
-            loop
-        )
-        result = future.result(timeout=30)
-        logger.info(f'✅ Готово (заявка #{answer_id})')
-        return result
-    except Exception as e:
-        logger.error(f'❌ Ошибка: {e}')
-        logger.error(traceback.format_exc())
-        raise
 
 # ============================================================
 # FLASK
@@ -190,9 +184,10 @@ def notify():
         
         logger.info(f'📨 Запрос на уведомление: заявка #{answer_id}')
         
+        # Отправляем уведомление в отдельном потоке
         def run_sync():
             try:
-                send_notification_sync(survey_type, answer_data, answer_id, date_str)
+                send_notification(survey_type, answer_data, answer_id, date_str)
             except Exception as e:
                 logger.error(f'❌ Ошибка в потоке: {e}')
         
@@ -219,11 +214,12 @@ def status():
         "bot_ready": client_ready,
         "bot_started": bot_started,
         "bot_name": client.user.name if client.user else None,
-        "guilds": len(client.guilds) if client.user else 0
+        "guilds": len(client.guilds) if client.user else 0,
+        "admin_id": ADMIN_USER_ID
     })
 
 # ============================================================
-# ЗАПУСК БОТА — ЭТА ЧАСТЬ ВЫПОЛНЯЕТСЯ ПРИ ИМПОРТЕ
+# ЗАПУСК БОТА
 # ============================================================
 
 logger.info('🚀 Инициализация бота...')
@@ -232,12 +228,10 @@ logger.info('🚀 Инициализация бота...')
 bot_thread = threading.Thread(target=run_bot, daemon=True)
 bot_thread.start()
 
-# Ждём, пока бот запустится
+# Ждём запуска бота
 logger.info('⏳ Ожидание запуска бота...')
-
-# Даём боту время на запуск (максимум 15 секунд)
 wait_time = 0
-while wait_time < 15:
+while wait_time < 20:
     if client_ready:
         break
     time.sleep(1)
@@ -247,13 +241,13 @@ while wait_time < 15:
 if client_ready:
     logger.info('✅ Бот успешно запущен!')
 else:
-    logger.warning('⚠️ Бот не готов через 15 секунд, но продолжаем...')
+    logger.warning('⚠️ Бот не готов через 20 секунд')
     logger.warning('⚠️ Проверьте токен и интернет-соединение')
 
 logger.info('🌐 Flask готов к работе')
 
 # ============================================================
-# ПРИ ЗАВЕРШЕНИИ — ОСТАНАВЛИВАЕМ БОТА
+# ЗАВЕРШЕНИЕ
 # ============================================================
 
 def shutdown():
@@ -263,11 +257,5 @@ def shutdown():
 
 atexit.register(shutdown)
 
-# ============================================================
-# ВАЖНО: НЕ ЗАПУСКАЕМ FLASK ЧЕРЕЗ app.run() — GUNICORN ЭТО ДЕЛАЕТ
-# ============================================================
-
-# Если этот файл запускается напрямую (не через Gunicorn) — запускаем Flask
 if __name__ == '__main__':
-    logger.info('🚀 Прямой запуск (не через Gunicorn)')
     app.run(host='0.0.0.0', port=8080)
