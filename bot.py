@@ -50,7 +50,7 @@ intents.members = True
 intents.dm_messages = True
 
 def format_datetime_msk(date_str):
-    """Форматирует дату в МСК (UTC+3)"""
+    """Форматирует дату, добавляя 3 часа для МСК"""
     try:
         formats = [
             '%Y-%m-%d %H:%M:%S',
@@ -70,18 +70,15 @@ def format_datetime_msk(date_str):
                 continue
         
         if dt is None:
-            return f"{date_str} (МСК)"
+            return date_str
         
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
+        # Просто добавляем 3 часа
+        dt_msk = dt + timedelta(hours=3)
         
-        msk_tz = timezone(timedelta(hours=3))
-        dt_msk = dt.astimezone(msk_tz)
-        
-        return dt_msk.strftime('%d.%m.%Y %H:%M (МСК)')
+        return dt_msk.strftime('%d.%m.%Y %H:%M')
     except Exception as e:
         logger.warning(f'⚠️ Ошибка форматирования даты: {e}')
-        return f"{date_str} (МСК)"
+        return date_str
 
 class NotificationBot(discord.Client):
     def __init__(self, *args, **kwargs):
