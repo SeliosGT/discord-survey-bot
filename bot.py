@@ -66,8 +66,9 @@ async def on_ready():
     
     try:
         user = await client.fetch_user(ADMIN_USER_ID)
-        await user.send('🤖 **Бот запущен!** Готов принимать уведомления.')
-        logger.info('✅ Приветствие отправлено админу в ЛС')
+        if user:
+            await user.send('🤖 **Бот запущен!** Готов принимать уведомления.')
+            logger.info('✅ Приветствие отправлено админу в ЛС')
     except Exception as e:
         logger.warning(f'⚠️ Не удалось отправить приветствие: {e}')
 
@@ -92,31 +93,19 @@ def run_bot():
         logger.error(traceback.format_exc())
 
 # ============================================================
-# ФУНКЦИЯ: ОТПРАВКА УВЕДОМЛЕНИЯ (ИСПРАВЛЕННАЯ)
+# АСИНХРОННАЯ ФУНКЦИЯ ОТПРАВКИ (новая)
 # ============================================================
 
-def send_notification(survey_type, answer_data, answer_id, date_str):
+async def async_send_notification(survey_type, answer_data, answer_id, date_str):
+    """Асинхронная версия отправки уведомления"""
     try:
         logger.info(f'📤 Отправка уведомления (заявка #{answer_id})')
         
-        if not client_ready:
-            logger.error('❌ Бот не готов к отправке')
-            return False
-        
-        # Получаем пользователя
-        user = client.get_user(ADMIN_USER_ID)
+        # Получаем пользователя через fetch_user (работает гарантированно)
+        user = await client.fetch_user(ADMIN_USER_ID)
         if not user:
-            logger.error('❌ Пользователь не найден в кеше, пробуем fetch...')
-            # Пробуем получить через fetch
-            future = asyncio.run_coroutine_threadsafe(
-                client.fetch_user(ADMIN_USER_ID),
-                loop
-            )
-            try:
-                user = future.result(timeout=10)
-            except Exception as e:
-                logger.error(f'❌ Не удалось получить пользователя: {e}')
-                return False
+            logger.error('❌ Не удалось получить пользователя')
+            return False
         
         type_names = {
             'discipline': '🏛️ Дисциплинарный инспектор',
@@ -146,36 +135,47 @@ def send_notification(survey_type, answer_data, answer_id, date_str):
             style=discord.ButtonStyle.link
         ))
         
-        # Отправляем с повторной попыткой
-        def send_message():
-            future = asyncio.run_coroutine_threadsafe(
-                user.send(
-                    content=f"🔔 **Новая заявка #{answer_id}!**",
-                    embed=embed,
-                    view=view
-                ),
-                loop
-            )
-            return future.result(timeout=30)
+        # Отправляем сообщение
+        await user.send(
+            content=f"🔔 **Новая заявка #{answer_id}!**",
+            embed=embed,
+            view=view
+        )
         
-        # Пробуем отправить с повторной попыткой
-        try:
-            send_message()
-            logger.info(f'✅ Уведомление отправлено (заявка #{answer_id})')
-            return True
-        except asyncio.TimeoutError:
-            logger.warning(f'⏰ Таймаут, пробуем ещё раз...')
-            time.sleep(2)
-            try:
-                send_message()
-                logger.info(f'✅ Уведомление отправлено (заявка #{answer_id}) со второй попытки')
-                return True
-            except asyncio.TimeoutError:
-                logger.error(f'⏰ Таймаут после двух попыток (заявка #{answer_id})')
-                return False
+        logger.info(f'✅ Уведомление отправлено (заявка #{answer_id})')
+        return True
         
     except Exception as e:
         logger.error(f'❌ Ошибка отправки: {e}')
+        logger.error(traceback.format_exc())
+        return False
+
+# ============================================================
+# СИНХРОННАЯ ОБЕРТКА ДЛЯ FLASK
+# ============================================================
+
+def send_notification_sync(survey_type, answer_data, answer_id, date_str):
+    """Синхронная обертка для вызова из Flask"""
+    if not loop or not client_ready:
+        logger.error('❌ Бот не готов к отправке')
+        return False
+    
+    try:
+        # Создаем корутину и отправляем в event loop
+        future = asyncio.run_coroutine_threadsafe(
+            async_send_notification(survey_type, answer_data, answer_id, date_str),
+            loop
+        )
+        
+        # Ждем результат с таймаутом
+        result = future.result(timeout=10)
+        return result
+        
+    except asyncio.TimeoutError:
+        logger.error(f'⏰ Таймаут отправки (заявка #{answer_id})')
+        return False
+    except Exception as e:
+        logger.error(f'❌ Ошибка в синхронной обертке: {e}')
         logger.error(traceback.format_exc())
         return False
 
@@ -196,23 +196,21 @@ def notify():
         
         logger.info(f'📨 Запрос на уведомление: заявка #{answer_id}')
         
-        # Отправляем синхронно (блокируем до отправки)
-        def run_sync():
-            try:
-                send_notification(survey_type, answer_data, answer_id, date_str)
-            except Exception as e:
-                logger.error(f'❌ Ошибка в потоке: {e}')
+        if not client_ready:
+            logger.error('❌ Бот не готов')
+            return jsonify({"success": False, "error": "Bot not ready"}), 503
         
-        thread = threading.Thread(target=run_sync, daemon=True)
-        thread.start()
+        # Отправляем синхронно
+        success = send_notification_sync(survey_type, answer_data, answer_id, date_str)
         
-        # Ждём немного, чтобы уведомление отправилось
-        time.sleep(1)
-        
-        return jsonify({"success": True}), 200
+        if success:
+            return jsonify({"success": True}), 200
+        else:
+            return jsonify({"success": False, "error": "Failed to send"}), 500
         
     except Exception as e:
         logger.error(f'❌ Ошибка в /notify: {e}')
+        logger.error(traceback.format_exc())
         return jsonify({"success": False, "error": str(e)}), 500
 
 @app.route('/')
@@ -242,7 +240,7 @@ if __name__ == '__main__':
     bot_thread = threading.Thread(target=run_bot, daemon=True)
     bot_thread.start()
     
-    # Ждём 5 секунд для запуска
+    # Ждем 5 секунд для запуска
     time.sleep(5)
     
     if client_ready:
